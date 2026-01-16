@@ -2,7 +2,6 @@ import express from "express";
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import tmp from "tmp";
@@ -98,62 +97,72 @@ app.post("/render", async (req, res) => {
     const audioSeconds = parseFloat(probeOut.trim());
     const audioMs = Math.round(audioSeconds * 1000);
 
-    // We want: first segment = audio duration, then end card fixed 4s
-    const totalMs = audioMs + Number(end_card_duration_ms || 4000);
-
-    // Create a 3-image slideshow for the audio duration (each third of audio)
-    // Then concat end card 4s.
     const w = Number(video.width || 1080);
     const h = Number(video.height || 1920);
     const fps = Number(video.fps || 30);
 
+    // Split audio duration into 3 image segments
     const seg1 = Math.floor(audioMs / 3);
     const seg2 = Math.floor(audioMs / 3);
     const seg3 = audioMs - seg1 - seg2;
 
-    // ffmpeg filtergraph:
-    // - scale images to fit 1080x1920 with blur background? (simple: scale+pad)
-    // - animate: slow zoom (optional) - keep simple: static.
-    // - burn subtitles only on first part (audio)
-    const filter = [
-      `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v0]`,
-      `[1:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v1]`,
-      `[2:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v2]`,
-      `[3:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v3]`,
+    // Escape SRT path for ffmpeg subtitles filter
+    const srtEsc = srtPath
+      .replace(/\\/g, "\\\\")
+      .replace(/:/g, "\\:");
 
-      // concat 3 images (durations) into one video stream "slideshow"
-      `[v0]trim=duration=${seg1/1000},setpts=PTS-STARTPTS[a0]`,
-      `[v1]trim=duration=${seg2/1000},setpts=PTS-STARTPTS[a1]`,
-      `[v2]trim=duration=${seg3/1000},setpts=PTS-STARTPTS[a2]`,
+    // COVER+CROP helper:
+    // - scale up until it fully covers 1080x1920, then crop to exact size.
+    // - force fps + yuv420p for consistent encoding.
+    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+
+    const filter = [
+      // Make each image a proper 9:16 frame (no black bars)
+      `[0:v]${coverCrop}[v0]`,
+      `[1:v]${coverCrop}[v1]`,
+      `[2:v]${coverCrop}[v2]`,
+      `[3:v]${coverCrop}[v3]`,
+
+      // Trim each image stream to its segment duration
+      `[v0]trim=duration=${(seg1 / 1000)},setpts=PTS-STARTPTS[a0]`,
+      `[v1]trim=duration=${(seg2 / 1000)},setpts=PTS-STARTPTS[a1]`,
+      `[v2]trim=duration=${(seg3 / 1000)},setpts=PTS-STARTPTS[a2]`,
       `[a0][a1][a2]concat=n=3:v=1:a=0[slideshow]`,
 
-      // burn subtitles on slideshow only
-      `[slideshow]subtitles=${srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:")}:force_style='FontName=Arial,FontSize=44,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'[subbed]`,
+      // Burn subtitles on slideshow only
+      `[slideshow]subtitles=${srtEsc}:force_style='FontName=Arial,FontSize=44,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=120'[subbed]`,
 
-      // end card fixed duration
-      `[v3]trim=duration=${Number(end_card_duration_ms)/1000},setpts=PTS-STARTPTS[endcard]`,
+      // End card fixed duration
+      `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000)},setpts=PTS-STARTPTS[endcard]`,
 
-      // concat slideshow + end card
+      // Concat slideshow + end card
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ].join(";");
 
-    // Inputs: 3 images + end image + audio
-    // We loop each image with -loop 1 and provide enough -t
-    // Then map vout + audio and stop at total duration.
     const args = [
       "-y",
-      "-loop", "1", "-t", (seg1/1000).toFixed(3), "-i", img1Path,
-      "-loop", "1", "-t", (seg2/1000).toFixed(3), "-i", img2Path,
-      "-loop", "1", "-t", (seg3/1000).toFixed(3), "-i", img3Path,
-      "-loop", "1", "-t", (Number(end_card_duration_ms)/1000).toFixed(3), "-i", endPath,
+
+      // loop images for their durations
+      "-loop", "1", "-t", (seg1 / 1000).toFixed(3), "-i", img1Path,
+      "-loop", "1", "-t", (seg2 / 1000).toFixed(3), "-i", img2Path,
+      "-loop", "1", "-t", (seg3 / 1000).toFixed(3), "-i", img3Path,
+      "-loop", "1", "-t", (Number(end_card_duration_ms) / 1000).toFixed(3), "-i", endPath,
+
+      // audio input
       "-i", audioPath,
+
       "-filter_complex", filter,
+
       "-map", "[vout]",
       "-map", "4:a",
+
+      // output
       "-r", String(fps),
       "-shortest",
       "-c:v", "libx264",
       "-pix_fmt", "yuv420p",
+      "-profile:v", "high",
+      "-level", "4.1",
       "-c:a", "aac",
       "-b:a", "192k",
       outPath
