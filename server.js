@@ -26,22 +26,9 @@ function ensureArray(val, name) {
   if (!Array.isArray(val)) throw new Error(`${name} must be an array`);
 }
 
-function msToSrtTime(msIn) {
-  let ms = Math.max(0, Math.round(Number(msIn) || 0));
-  const h = Math.floor(ms / 3600000);
-  ms -= h * 3600000;
-  const m = Math.floor(ms / 60000);
-  ms -= m * 60000;
-  const s = Math.floor(ms / 1000);
-  const ms2 = ms - s * 1000;
-  const pad = (n, w = 2) => String(n).padStart(w, "0");
-  return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms2).padStart(3, "0")}`;
-}
-
 function wrapToTwoLines(text, maxCharsPerLine = 30) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
-
   if (t.length <= maxCharsPerLine) return t;
 
   const words = t.split(" ");
@@ -59,8 +46,7 @@ function wrapToTwoLines(text, maxCharsPerLine = 30) {
   }
 
   if (!line1) {
-    line1 = t.slice(0, maxCharsPerLine - 1) + "…";
-    return line1;
+    return t.slice(0, maxCharsPerLine - 1) + "…";
   }
 
   const rest = words.slice(i).join(" ").trim();
@@ -83,27 +69,20 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     const end = Number(c?.end_ms);
     const txt = String(c?.text || "").trim();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
-    items.push({
-      start_ms: start,
-      end_ms: end,
-      dur_ms: end - start,
-      text: txt
-    });
+    items.push({ dur_ms: end - start, text: txt });
   }
-
   if (items.length === 0) return [];
 
+  // Fallback: keep original durations chained
   if (!Number.isFinite(audioMs) || audioMs <= 0) {
-    const sanitized = [];
+    const out = [];
     let cur = 0;
     for (const it of items) {
       const dur = Math.max(1, Math.round(it.dur_ms));
-      const start_ms = cur;
-      const end_ms = start_ms + dur;
-      sanitized.push({ start_ms, end_ms, text: it.text });
-      cur = end_ms;
+      out.push({ start_ms: cur, end_ms: cur + dur, text: it.text });
+      cur += dur;
     }
-    return sanitized;
+    return out;
   }
 
   const totalDur = items.reduce((acc, it) => acc + Math.max(1, Math.round(it.dur_ms)), 0);
@@ -119,15 +98,13 @@ function normalizeAndScaleCaptions(captions, audioMs) {
 
   const scaled = items.map((it) => {
     const d = Math.max(1, Math.round(it.dur_ms));
-    const sd = Math.max(minSegMs, Math.round(d * factor));
-    return { text: it.text, dur_ms: sd };
+    return { text: it.text, dur_ms: Math.max(minSegMs, Math.round(d * factor)) };
   });
 
   let sum = scaled.reduce((acc, x) => acc + x.dur_ms, 0);
 
   if (sum > audioMs) {
     let over = sum - audioMs;
-
     const idx = scaled
       .map((x, i) => ({ i, d: x.dur_ms }))
       .sort((a, b) => b.d - a.d)
@@ -150,8 +127,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
       }
     }
   } else if (sum < audioMs) {
-    const under = audioMs - sum;
-    scaled[scaled.length - 1].dur_ms += under;
+    scaled[scaled.length - 1].dur_ms += audioMs - sum;
   }
 
   const out = [];
@@ -163,10 +139,19 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     out.push({ start_ms, end_ms, text: scaled[i].text });
     cur = end_ms;
   }
-
   if (out.length) out[out.length - 1].end_ms = audioMs;
 
   return out;
+}
+
+// Escape for ffmpeg drawtext "text="
+function escDrawtext(t) {
+  return String(t || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'")
+    .replace(/%/g, "\\%")
+    .replace(/\n/g, "\\n");
 }
 
 app.post("/render", async (req, res) => {
@@ -193,7 +178,6 @@ app.post("/render", async (req, res) => {
     const img2Path = path.join(workDir, "img2.png");
     const img3Path = path.join(workDir, "img3.png");
     const endPath = path.join(workDir, "end.png");
-    const srtPath = path.join(workDir, "captions.srt");
     const outPath = path.join(workDir, "out.mp4");
 
     await downloadToFile(audio_url, audioPath);
@@ -202,6 +186,7 @@ app.post("/render", async (req, res) => {
     await downloadToFile(images[2], img3Path);
     await downloadToFile(end_card_url, endPath);
 
+    // Audio duration
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
@@ -214,9 +199,7 @@ app.post("/render", async (req, res) => {
         audioPath
       ]);
       const audioSeconds = parseFloat(String(probeOut || "").trim());
-      if (Number.isFinite(audioSeconds) && audioSeconds > 0) {
-        audioMs = Math.round(audioSeconds * 1000);
-      }
+      if (Number.isFinite(audioSeconds) && audioSeconds > 0) audioMs = Math.round(audioSeconds * 1000);
     } catch (_e) {
       audioMs = NaN;
     }
@@ -227,70 +210,66 @@ app.post("/render", async (req, res) => {
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    const srtLines = [];
-    let idx = 1;
-    for (const c of scaledCaptions) {
-      const start = Number(c.start_ms);
-      const end = Number(c.end_ms);
-      const wrapped = wrapToTwoLines(c.text, 30);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !wrapped) continue;
-
-      srtLines.push(String(idx++));
-      srtLines.push(`${msToSrtTime(start)} --> ${msToSrtTime(end)}`);
-      srtLines.push(wrapped);
-      srtLines.push("");
-    }
-    fs.writeFileSync(srtPath, srtLines.join("\n"), "utf8");
-
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
+    // 3-image slideshow durations
     const seg1 = Math.floor(effectiveAudioMs / 3);
     const seg2 = Math.floor(effectiveAudioMs / 3);
     const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
 
-    // Subtitle dock: bottom 25% + safe padding
+    // --- SUBTITLE VISUALS (ONLY CHANGES HERE) ---
+    // Bottom 25% dock
     const dockHeight = Math.round(h * 0.25);
+    const dockY = h - dockHeight;
 
-    // Keep safe sides, but push captions lower + smaller
-    const padLR = Math.round(w * 0.06); // keep
-    const padBottom = Math.round(h * 0.035); // LOWER: smaller margin -> closer to bottom
+    // Push captions INTO the dock, near bottom
+    const padLR = Math.round(w * 0.07);
+    const padBottom = Math.round(h * 0.02); // closer to bottom (inside dock)
 
-    const marginV = Math.max(0, padBottom);
-    const marginL = Math.max(0, padLR);
-    const marginR = Math.max(0, padLR);
+    // MUCH smaller font (target ~80%+ smaller vs previous perceived size)
+    const fontSize = Math.max(10, Math.round(h * 0.006)); // ~12 on 1920px height
+    const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
+    const borderW = 2;
 
-    // Smaller font
-    const fontSize = Math.max(22, Math.round(h * 0.014)); // smaller than before
-    const outline = 2;
-    const spacing = 6;
+    // Caption baseline y position (kept inside the dark dock)
+    // bottom aligned: y = h - padBottom - text_h
+    const yExpr = `h-${padBottom}-text_h`;
+    const xExpr = `(w-text_w)/2`;
 
-    const srtEsc = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+    // Dark dock (keep)
+    const dockAlpha = 0.35;
+    const dockColor = "black";
+    // -------------------------------------------
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    const subtitleStyle = [
-      `FontName=Arial`,
-      `FontSize=${fontSize}`,
-      `PrimaryColour=&H00FFFFFF`,
-      `OutlineColour=&H00000000`,
-      `BorderStyle=1`,
-      `Outline=${outline}`,
-      `Shadow=0`,
-      `Alignment=2`,
-      `MarginV=${marginV}`,
-      `MarginL=${marginL}`,
-      `MarginR=${marginR}`,
-      `Spacing=${spacing}`
-    ].join(",");
+    // Build drawtext chain (applies ONLY on slideshow part)
+    const drawtexts = scaledCaptions.map((c) => {
+      const start = (Number(c.start_ms) / 1000).toFixed(3);
+      const end = (Number(c.end_ms) / 1000).toFixed(3);
+      const wrapped = wrapToTwoLines(c.text, 30);
+      const safeText = escDrawtext(wrapped);
 
-    // Dock band for readability (unchanged)
-    const dockY = h - dockHeight;
-    const dockAlpha = 0.35;
-    const dockColor = "black";
+      return (
+        `drawtext=` +
+        `font=DejaVuSans:` +
+        `text='${safeText}':` +
+        `fontsize=${fontSize}:` +
+        `fontcolor=white:` +
+        `borderw=${borderW}:` +
+        `bordercolor=black@1:` +
+        `line_spacing=${lineSpacing}:` +
+        `x=${xExpr}:` +
+        `y=${yExpr}:` +
+        `enable='between(t,${start},${end})'`
+      );
+    });
+
+    const drawChain = drawtexts.length ? "," + drawtexts.join(",") : "";
 
     const filter = [
       `[0:v]${coverCrop}[v0]`,
@@ -305,7 +284,7 @@ app.post("/render", async (req, res) => {
 
       `[slideshow]drawbox=x=0:y=${dockY}:w=${w}:h=${dockHeight}:color=${dockColor}@${dockAlpha}:t=fill[slideshow_docked]`,
 
-      `[slideshow_docked]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subbed]`,
+      `[slideshow_docked]${drawChain.slice(1)}[subbed]`, // slice(1) removes the leading comma added above
 
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
 
