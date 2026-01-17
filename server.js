@@ -197,8 +197,8 @@ app.post("/render", async (req, res) => {
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // === CAPTION VISUALS (INCREASED +50%) ===
-    const fontSizeBase = Math.max(14, Math.round(h * 0.009));
+    // === CAPTION VISUALS (FONT SIZE BASE = 40px) ===
+    const fontSizeBase = 40; // <-- CHANGED: fixed base size
     const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // +50%
     const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
     const borderW = 2;
@@ -206,7 +206,7 @@ app.post("/render", async (req, res) => {
     // Center around 84% height: y = (h*0.84) - (text_h/2)
     const yExpr = `(h*0.84)-(text_h/2)`;
     const xExpr = `(w-text_w)/2`;
-    // =======================================
+    // ==============================================
 
     const drawtexts = scaledCaptions.map((c) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
