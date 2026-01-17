@@ -41,7 +41,6 @@ function msToSrtTime(msIn) {
 function wrapToTwoLines(text, maxCharsPerLine = 30) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
-
   if (t.length <= maxCharsPerLine) return t;
 
   const words = t.split(" ");
@@ -58,29 +57,22 @@ function wrapToTwoLines(text, maxCharsPerLine = 30) {
     }
   }
 
-  // If first word is longer than max, hard cut it
-  if (!line1) {
-    line1 = t.slice(0, maxCharsPerLine - 1) + "…";
-    return line1;
-  }
+  if (!line1) return t.slice(0, maxCharsPerLine - 1) + "…";
 
   const rest = words.slice(i).join(" ").trim();
   if (!rest) return line1;
 
   let line2 = rest;
   if (line2.length > maxCharsPerLine) {
-    // Try to cut line2 nicely
     line2 = line2.slice(0, maxCharsPerLine - 1).trimEnd() + "…";
   }
 
-  // Ensure max 2 lines
   return `${line1}\n${line2}`;
 }
 
 function normalizeAndScaleCaptions(captions, audioMs) {
   if (!Array.isArray(captions)) return [];
 
-  // Keep original order; only valid entries
   const items = [];
   for (const c of captions) {
     const start = Number(c?.start_ms);
@@ -97,9 +89,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
 
   if (items.length === 0) return [];
 
-  // If we can't get audio duration, fallback to original timings (but sanitized)
   if (!Number.isFinite(audioMs) || audioMs <= 0) {
-    // Sanitize to be contiguous and start at 0 using original durations
     const sanitized = [];
     let cur = 0;
     for (const it of items) {
@@ -112,33 +102,28 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     return sanitized;
   }
 
-  // Use sum of segment durations (ignore any original gaps) to preserve relative ratios
   const totalDur = items.reduce((acc, it) => acc + Math.max(1, Math.round(it.dur_ms)), 0);
   if (totalDur <= 0) return [];
 
   const factor = audioMs / totalDur;
 
-  // Base min duration (ms) + safety if too many segments
   const n = items.length;
   let minSegMs = 600;
   const maxPossibleMin = Math.floor(audioMs / n);
   if (maxPossibleMin <= 0) minSegMs = 80;
   else if (minSegMs > maxPossibleMin) minSegMs = Math.max(80, maxPossibleMin);
 
-  // First pass: scaled durations with min clamp
   const scaled = items.map((it) => {
     const d = Math.max(1, Math.round(it.dur_ms));
     const sd = Math.max(minSegMs, Math.round(d * factor));
     return { text: it.text, dur_ms: sd };
   });
 
-  // Adjust durations so sum exactly equals audioMs
   let sum = scaled.reduce((acc, x) => acc + x.dur_ms, 0);
 
   if (sum > audioMs) {
     let over = sum - audioMs;
 
-    // Reduce from longest segments first, never below minSegMs
     const idx = scaled
       .map((x, i) => ({ i, d: x.dur_ms }))
       .sort((a, b) => b.d - a.d)
@@ -152,7 +137,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
       over -= reduceBy;
     }
 
-    // If still over (extreme case), force reduce from end even if below min (last resort)
     if (over > 0) {
       for (let i = scaled.length - 1; i >= 0 && over > 0; i--) {
         const canReduce = Math.max(0, scaled[i].dur_ms - 1);
@@ -163,11 +147,9 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     }
   } else if (sum < audioMs) {
     const under = audioMs - sum;
-    // Add all remaining ms to last segment (keeps continuity, preserves ratios best without rebalancing)
     scaled[scaled.length - 1].dur_ms += under;
   }
 
-  // Build strictly contiguous timeline starting at 0 and ending exactly at audioMs
   const out = [];
   let cur = 0;
   for (let i = 0; i < scaled.length; i++) {
@@ -178,9 +160,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     cur = end_ms;
   }
 
-  // Final guard: ensure last end == audioMs
   if (out.length) out[out.length - 1].end_ms = audioMs;
-
   return out;
 }
 
@@ -221,9 +201,12 @@ app.post("/render", async (req, res) => {
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         audioPath
       ]);
       const audioSeconds = parseFloat(String(probeOut || "").trim());
@@ -238,10 +221,10 @@ app.post("/render", async (req, res) => {
     const h = Number(video.height || 1920);
     const fps = Number(video.fps || 30);
 
-    // Normalize + scale captions to match audio duration (must-have)
+    // Normalize + scale captions to match audio duration (KEEP AS-IS)
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    // Write SRT (with enforced max 2 lines, smaller text)
+    // Write SRT (max 2 lines)
     const srtLines = [];
     let idx = 1;
     for (const c of scaledCaptions) {
@@ -257,46 +240,47 @@ app.post("/render", async (req, res) => {
     }
     fs.writeFileSync(srtPath, srtLines.join("\n"), "utf8");
 
-    // If audio duration missing, approximate from captions end (so slideshow still renders)
+    // If audio duration missing, approximate from captions end
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // Slideshow segmentation for 3 images over audio duration
+    // Slideshow durations
     const seg1 = Math.floor(effectiveAudioMs / 3);
     const seg2 = Math.floor(effectiveAudioMs / 3);
     const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
 
-    // Subtitle dock: bottom 25% + safe padding
-    const dockHeight = Math.round(h * 0.25);
-    const padLR = Math.round(w * 0.06);   // ~6% width
-    const padBottom = Math.round(h * 0.06); // ~6% height
-    const padTopInDock = Math.round(dockHeight * 0.18); // breathing room inside dock
+    // COVER + CROP to 9:16 for all images (Solution A stays)
+    const coverCropRGBA = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=rgba`;
+    const coverCropYUV = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // Place subtitles near bottom center, inside dock.
-    // With max 2 lines + smaller font, this stays in bottom 25%.
-    const marginV = Math.max(0, padBottom);
-    const marginL = Math.max(0, padLR);
-    const marginR = Math.max(0, padLR);
+    // ---- Subtitle rendering locked to bottom 25% via separate layer ----
+    const dockH = Math.round(h * 0.25);
+    const dockY = h - dockH;
 
-    const fontSize = Math.max(26, Math.round(h * 0.018)); // smaller, consistent across 9:16
+    // Padding inside dock
+    const padLR = Math.round(w * 0.07); // 7% width
+    const padBottom = Math.round(dockH * 0.14); // bottom padding within dock
+    const padTop = Math.round(dockH * 0.10); // top breathing room within dock (by limiting font size)
+
+    // Font sizing based on dock height (not whole video) + hard caps
+    // Goal: predictable physical size on 1080x1920
+    const fontMin = 24;
+    const fontMax = 52;
+    const fontBase = Math.round(dockH * 0.14); // ~14% of dock height
+    const fontSize = Math.max(fontMin, Math.min(fontMax, fontBase));
+
+    // Moderate line spacing (libass "Spacing" is extra spacing between glyphs, not line-height; keep small)
+    // We'll rely on font size + 2-line max to keep within dock.
     const outline = 2;
-    const spacing = 6;
 
-    const srtEsc = srtPath
-      .replace(/\\/g, "\\\\")
-      .replace(/:/g, "\\:");
+    // Escape SRT path for ffmpeg subtitles filter
+    const srtEsc = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 
-    // Rešitev A (cover + crop) for all images
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
-
-    // Subtitles style (ASS via libass)
-    // - smaller font
-    // - padding via margins
-    // - bottom-center alignment
-    // - safe-ish line spacing
+    // Use original_size to prevent libass PlayRes scaling surprises
+    // Render subtitles onto a transparent layer sized (w x dockH), then overlay at y=dockY.
     const subtitleStyle = [
       `FontName=Arial`,
       `FontSize=${fontSize}`,
@@ -305,60 +289,94 @@ app.post("/render", async (req, res) => {
       `BorderStyle=1`,
       `Outline=${outline}`,
       `Shadow=0`,
-      `Alignment=2`,
-      `MarginV=${marginV}`,
-      `MarginL=${marginL}`,
-      `MarginR=${marginR}`,
-      `Spacing=${spacing}`
+      `Alignment=2`, // bottom-center within the DOCK layer
+      `MarginV=${padBottom}`,
+      `MarginL=${padLR}`,
+      `MarginR=${padLR}`
     ].join(",");
 
-    // We also add a subtle transparent dock band (optional but helps readability),
-    // without affecting layout: draw a semi-transparent box in bottom 25%.
-    const dockY = h - dockHeight;
-    const dockAlpha = 0.35; // 0..1
-    const dockColor = "black";
-
+    // ffmpeg filtergraph
     const filter = [
-      `[0:v]${coverCrop}[v0]`,
-      `[1:v]${coverCrop}[v1]`,
-      `[2:v]${coverCrop}[v2]`,
-      `[3:v]${coverCrop}[v3]`,
+      // Prepare 3 images as RGBA
+      `[0:v]${coverCropRGBA}[v0]`,
+      `[1:v]${coverCropRGBA}[v1]`,
+      `[2:v]${coverCropRGBA}[v2]`,
 
+      // End card as YUV (no subtitles)
+      `[3:v]${coverCropYUV}[vend]`,
+
+      // Slideshow concat (RGBA)
       `[v0]trim=duration=${seg1 / 1000},setpts=PTS-STARTPTS[s0]`,
       `[v1]trim=duration=${seg2 / 1000},setpts=PTS-STARTPTS[s1]`,
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
-      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
+      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow_rgba]`,
 
-      // Add dock band + burn subtitles only on slideshow
-      `[slideshow]drawbox=x=0:y=${dockY}:w=${w}:h=${dockHeight}:color=${dockColor}@${dockAlpha}:t=fill[slideshow_docked]`,
+      // Build transparent subtitle layer locked to dock size
+      `color=c=black@0.0:s=${w}x${dockH}:r=${fps},format=rgba[subbase]`,
 
-      // Slightly lift subtitles inside dock via additional top padding in the dock band (visual safety)
-      // (MarginV already ensures bottom padding; dock band ensures readability)
-      `[slideshow_docked]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subbed]`,
+      // Burn subtitles onto the dock layer (NOT the full frame)
+      `[subbase]subtitles=${srtEsc}:original_size=${w}x${dockH}:force_style='${subtitleStyle}'[subdock]`,
 
-      `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
+      // Overlay dock subtitles onto slideshow at y=dockY, then convert to yuv for final concat
+      `[slideshow_rgba][subdock]overlay=x=0:y=${dockY}:format=auto[subbed_rgba]`,
+      `[subbed_rgba]format=yuv420p[subbed_yuv]`,
 
-      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
+      // End card fixed duration (YUV)
+      `[vend]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard_yuv]`,
+
+      // Concat slideshow(with subs) + end card
+      `[subbed_yuv][endcard_yuv]concat=n=2:v=1:a=0[vout]`
     ].join(";");
 
     const args = [
       "-y",
-      "-loop", "1", "-t", (seg1 / 1000).toFixed(3), "-i", img1Path,
-      "-loop", "1", "-t", (seg2 / 1000).toFixed(3), "-i", img2Path,
-      "-loop", "1", "-t", (seg3 / 1000).toFixed(3), "-i", img3Path,
-      "-loop", "1", "-t", (Number(end_card_duration_ms) / 1000).toFixed(3), "-i", endPath,
-      "-i", audioPath,
-      "-filter_complex", filter,
-      "-map", "[vout]",
-      "-map", "4:a",
-      "-r", String(fps),
+      "-loop",
+      "1",
+      "-t",
+      (seg1 / 1000).toFixed(3),
+      "-i",
+      img1Path,
+      "-loop",
+      "1",
+      "-t",
+      (seg2 / 1000).toFixed(3),
+      "-i",
+      img2Path,
+      "-loop",
+      "1",
+      "-t",
+      (seg3 / 1000).toFixed(3),
+      "-i",
+      img3Path,
+      "-loop",
+      "1",
+      "-t",
+      (Number(end_card_duration_ms) / 1000).toFixed(3),
+      "-i",
+      endPath,
+      "-i",
+      audioPath,
+      "-filter_complex",
+      filter,
+      "-map",
+      "[vout]",
+      "-map",
+      "4:a",
+      "-r",
+      String(fps),
       "-shortest",
-      "-c:v", "libx264",
-      "-pix_fmt", "yuv420p",
-      "-profile:v", "high",
-      "-level", "4.1",
-      "-c:a", "aac",
-      "-b:a", "192k",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-profile:v",
+      "high",
+      "-level",
+      "4.1",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
       outPath
     ];
 
