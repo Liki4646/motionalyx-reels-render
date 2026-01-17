@@ -41,7 +41,6 @@ function msToSrtTime(msIn) {
 function wrapToTwoLines(text, maxCharsPerLine = 28) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
-
   if (t.length <= maxCharsPerLine) return t;
 
   const words = t.split(" ");
@@ -58,9 +57,7 @@ function wrapToTwoLines(text, maxCharsPerLine = 28) {
     }
   }
 
-  if (!line1) {
-    return t.slice(0, maxCharsPerLine - 1) + "…";
-  }
+  if (!line1) return t.slice(0, maxCharsPerLine - 1) + "…";
 
   const rest = words.slice(i).join(" ").trim();
   if (!rest) return line1;
@@ -90,16 +87,14 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   if (items.length === 0) return [];
 
   if (!Number.isFinite(audioMs) || audioMs <= 0) {
-    const sanitized = [];
+    const out = [];
     let cur = 0;
     for (const it of items) {
       const dur = Math.max(1, it.dur_ms);
-      const start_ms = cur;
-      const end_ms = start_ms + dur;
-      sanitized.push({ start_ms, end_ms, text: it.text });
-      cur = end_ms;
+      out.push({ start_ms: cur, end_ms: cur + dur, text: it.text });
+      cur += dur;
     }
-    return sanitized;
+    return out;
   }
 
   const totalDur = items.reduce((a, it) => a + it.dur_ms, 0);
@@ -113,10 +108,10 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   if (maxPossibleMin <= 0) minSegMs = 80;
   else if (minSegMs > maxPossibleMin) minSegMs = Math.max(80, maxPossibleMin);
 
-  const scaled = items.map((it) => {
-    const sd = Math.max(minSegMs, Math.round(it.dur_ms * factor));
-    return { text: it.text, dur_ms: sd };
-  });
+  const scaled = items.map((it) => ({
+    text: it.text,
+    dur_ms: Math.max(minSegMs, Math.round(it.dur_ms * factor))
+  }));
 
   let sum = scaled.reduce((a, x) => a + x.dur_ms, 0);
 
@@ -215,7 +210,7 @@ app.post("/render", async (req, res) => {
     // Scale captions to audio duration
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    // Write SRT (max 2 lines + smaller text via force_style)
+    // Write SRT (max 2 lines)
     const srtLines = [];
     let idx = 1;
     for (const c of scaledCaptions) {
@@ -242,21 +237,22 @@ app.post("/render", async (req, res) => {
     const seg2 = Math.floor(effectiveAudioMs / 3);
     const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
 
-    // --- Subtitle dock layer (guaranteed bottom 25%) ---
+    // Subtitle dock: bottom 25% (no background overlay)
     const dockH = Math.round(h * 0.25);
     const dockY = h - dockH;
 
     // Safe padding inside dock
     const padLR = Math.round(w * 0.07);
     const padBottom = Math.round(dockH * 0.14);
-    const padTop = Math.round(dockH * 0.14);
 
-    // Smaller typography
-    const fontSize = Math.max(24, Math.round(h * 0.014)); // smaller than before
-    const lineSpacing = 5;
+    // Smaller typography (aim max 2 lines)
+    const fontSize = Math.max(22, Math.round(h * 0.013));
+    const lineSpacing = 4;
 
-    // Subtitle style (relative to the DOCK layer, not the full video)
-    // Alignment=2 => bottom center inside dock
+    // IMPORTANT:
+    // We burn subtitles onto a transparent layer sized to the dock (so they can never exceed dock),
+    // then overlay that layer ON TOP of the full-screen image slideshow.
+    // That guarantees: subtitles visible + always within bottom 25%.
     const subtitleStyle = [
       `FontName=Arial`,
       `FontSize=${fontSize}`,
@@ -274,11 +270,8 @@ app.post("/render", async (req, res) => {
 
     const srtEsc = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 
-    // Rešitev A for images: cover + crop to 9:16
+    // Full-screen images (cover + crop)
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
-
-    // Optional subtle translucent dock background (only within bottom 25%)
-    const dockAlpha = 0.28;
 
     const filter = [
       `[0:v]${coverCrop}[v0]`,
@@ -291,11 +284,11 @@ app.post("/render", async (req, res) => {
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      // Build an overlay layer EXACTLY dockH tall, burn subtitles onto it,
-      // then overlay it onto the slideshow at the bottom.
+      // Transparent dock layer (RGBA). No drawbox, no darkening.
       `color=c=black@0.0:s=${w}x${dockH}:r=${fps},format=rgba[subbase]`,
-      `[subbase]drawbox=x=0:y=0:w=${w}:h=${dockH}:color=black@${dockAlpha}:t=fill[subdockbg]`,
-      `[subdockbg]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subdock]`,
+      `[subbase]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subdock]`,
+
+      // Overlay subtitles ON TOP of slideshow, positioned at bottom (dockY)
       `[slideshow][subdock]overlay=0:${dockY}:format=auto[slideshow_subbed]`,
 
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
