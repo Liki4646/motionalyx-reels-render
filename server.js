@@ -26,6 +26,49 @@ function ensureArray(val, name) {
   if (!Array.isArray(val)) throw new Error(`${name} must be an array`);
 }
 
+// OPTION 1: wrap to max 2 lines + ellipsis
+function wrapToTwoLines(text, maxCharsPerLine = 26) {
+  // Keep meaning, but make it safe for wrapping:
+  // - treat both real newlines and literal "\n" as spaces before wrapping
+  // - collapse whitespace so line lengths are predictable
+  const t = String(text || "")
+    .replace(/\\r\\n|\\n/g, " ")
+    .replace(/\r\n|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!t) return "";
+  if (t.length <= maxCharsPerLine) return t;
+
+  const words = t.split(" ");
+  let line1 = "";
+  let i = 0;
+
+  while (i < words.length) {
+    const cand = line1 ? `${line1} ${words[i]}` : words[i];
+    if (cand.length <= maxCharsPerLine) {
+      line1 = cand;
+      i += 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!line1) {
+    return t.slice(0, Math.max(1, maxCharsPerLine - 1)) + "…";
+  }
+
+  const rest = words.slice(i).join(" ").trim();
+  if (!rest) return line1;
+
+  let line2 = rest;
+  if (line2.length > maxCharsPerLine) {
+    line2 = line2.slice(0, Math.max(1, maxCharsPerLine - 1)).trimEnd() + "…";
+  }
+
+  return `${line1}\n${line2}`;
+}
+
 function normalizeAndScaleCaptions(captions, audioMs) {
   if (!Array.isArray(captions)) return [];
 
@@ -110,15 +153,12 @@ function normalizeAndScaleCaptions(captions, audioMs) {
 }
 
 // IMPORTANT FIX:
-// - Do NOT alter caption text content (no wrapping, no whitespace normalization).
-// - But we must escape for FFmpeg drawtext parsing.
-// - And we must encode real newlines as "\\n" (double backslash) so FFmpeg renders a line break
-//   instead of eating "\" and leaving "n" in the text.
+// - Escape for FFmpeg drawtext parsing
+// - Encode real newlines as "\\n" (double backslash) so FFmpeg renders a line break
 function escDrawtext(t) {
   let s = String(t || "");
 
   // If input contains literal "\n" or "\r\n" sequences, interpret them as actual newlines.
-  // This preserves intent without changing words/spaces.
   s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
 
   return s
@@ -126,7 +166,6 @@ function escDrawtext(t) {
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'")
     .replace(/%/g, "\\%")
-    // FFmpeg drawtext newline requires \\n (double backslash) inside filter string
     .replace(/\n/g, "\\\\n");
 }
 
@@ -198,7 +237,7 @@ app.post("/render", async (req, res) => {
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     // === CAPTION VISUALS (FONT SIZE BASE = 40px) ===
-    const fontSizeBase = 40; // <-- CHANGED: fixed base size
+    const fontSizeBase = 40;
     const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // +50%
     const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
     const borderW = 2;
@@ -212,8 +251,9 @@ app.post("/render", async (req, res) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
       const end = (Number(c.end_ms) / 1000).toFixed(3);
 
-      // IMPORTANT: Use caption text exactly as provided (no wrapping/normalizing).
-      const safeText = escDrawtext(c.text);
+      // OPTION 1: Wrap to 2 lines + ellipsis
+      const wrapped = wrapToTwoLines(c.text, 26);
+      const safeText = escDrawtext(wrapped);
 
       return (
         `drawtext=` +
