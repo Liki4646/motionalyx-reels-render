@@ -38,9 +38,10 @@ function msToSrtTime(msIn) {
   return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms2).padStart(3, "0")}`;
 }
 
-function wrapToTwoLines(text, maxCharsPerLine = 28) {
+function wrapToTwoLines(text, maxCharsPerLine = 30) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
+
   if (t.length <= maxCharsPerLine) return t;
 
   const words = t.split(" ");
@@ -57,7 +58,10 @@ function wrapToTwoLines(text, maxCharsPerLine = 28) {
     }
   }
 
-  if (!line1) return t.slice(0, maxCharsPerLine - 1) + "…";
+  if (!line1) {
+    line1 = t.slice(0, maxCharsPerLine - 1) + "…";
+    return line1;
+  }
 
   const rest = words.slice(i).join(" ").trim();
   if (!rest) return line1;
@@ -80,49 +84,56 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     const txt = String(c?.text || "").trim();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
     items.push({
-      dur_ms: Math.max(1, Math.round(end - start)),
+      start_ms: start,
+      end_ms: end,
+      dur_ms: end - start,
       text: txt
     });
   }
+
   if (items.length === 0) return [];
 
   if (!Number.isFinite(audioMs) || audioMs <= 0) {
-    const out = [];
+    const sanitized = [];
     let cur = 0;
     for (const it of items) {
-      const dur = Math.max(1, it.dur_ms);
-      out.push({ start_ms: cur, end_ms: cur + dur, text: it.text });
-      cur += dur;
+      const dur = Math.max(1, Math.round(it.dur_ms));
+      const start_ms = cur;
+      const end_ms = start_ms + dur;
+      sanitized.push({ start_ms, end_ms, text: it.text });
+      cur = end_ms;
     }
-    return out;
+    return sanitized;
   }
 
-  const totalDur = items.reduce((a, it) => a + it.dur_ms, 0);
+  const totalDur = items.reduce((acc, it) => acc + Math.max(1, Math.round(it.dur_ms)), 0);
   if (totalDur <= 0) return [];
 
   const factor = audioMs / totalDur;
-  const n = items.length;
 
-  let minSegMs = 550;
+  const n = items.length;
+  let minSegMs = 600;
   const maxPossibleMin = Math.floor(audioMs / n);
   if (maxPossibleMin <= 0) minSegMs = 80;
   else if (minSegMs > maxPossibleMin) minSegMs = Math.max(80, maxPossibleMin);
 
-  const scaled = items.map((it) => ({
-    text: it.text,
-    dur_ms: Math.max(minSegMs, Math.round(it.dur_ms * factor))
-  }));
+  const scaled = items.map((it) => {
+    const d = Math.max(1, Math.round(it.dur_ms));
+    const sd = Math.max(minSegMs, Math.round(d * factor));
+    return { text: it.text, dur_ms: sd };
+  });
 
-  let sum = scaled.reduce((a, x) => a + x.dur_ms, 0);
+  let sum = scaled.reduce((acc, x) => acc + x.dur_ms, 0);
 
   if (sum > audioMs) {
     let over = sum - audioMs;
-    const order = scaled
+
+    const idx = scaled
       .map((x, i) => ({ i, d: x.dur_ms }))
       .sort((a, b) => b.d - a.d)
       .map((x) => x.i);
 
-    for (const i of order) {
+    for (const i of idx) {
       if (over <= 0) break;
       const canReduce = Math.max(0, scaled[i].dur_ms - minSegMs);
       const reduceBy = Math.min(canReduce, over);
@@ -139,7 +150,8 @@ function normalizeAndScaleCaptions(captions, audioMs) {
       }
     }
   } else if (sum < audioMs) {
-    scaled[scaled.length - 1].dur_ms += (audioMs - sum);
+    const under = audioMs - sum;
+    scaled[scaled.length - 1].dur_ms += under;
   }
 
   const out = [];
@@ -151,7 +163,9 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     out.push({ start_ms, end_ms, text: scaled[i].text });
     cur = end_ms;
   }
+
   if (out.length) out[out.length - 1].end_ms = audioMs;
+
   return out;
 }
 
@@ -188,17 +202,21 @@ app.post("/render", async (req, res) => {
     await downloadToFile(images[2], img3Path);
     await downloadToFile(end_card_url, endPath);
 
-    // Audio duration (ms)
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         audioPath
       ]);
       const audioSeconds = parseFloat(String(probeOut || "").trim());
-      if (Number.isFinite(audioSeconds) && audioSeconds > 0) audioMs = Math.round(audioSeconds * 1000);
+      if (Number.isFinite(audioSeconds) && audioSeconds > 0) {
+        audioMs = Math.round(audioSeconds * 1000);
+      }
     } catch (_e) {
       audioMs = NaN;
     }
@@ -207,16 +225,14 @@ app.post("/render", async (req, res) => {
     const h = Number(video.height || 1920);
     const fps = Number(video.fps || 30);
 
-    // Scale captions to audio duration
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    // Write SRT (max 2 lines)
     const srtLines = [];
     let idx = 1;
     for (const c of scaledCaptions) {
       const start = Number(c.start_ms);
       const end = Number(c.end_ms);
-      const wrapped = wrapToTwoLines(c.text, 28);
+      const wrapped = wrapToTwoLines(c.text, 30);
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !wrapped) continue;
 
       srtLines.push(String(idx++));
@@ -226,7 +242,6 @@ app.post("/render", async (req, res) => {
     }
     fs.writeFileSync(srtPath, srtLines.join("\n"), "utf8");
 
-    // Fallback effective audio length if probe fails
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
@@ -237,41 +252,45 @@ app.post("/render", async (req, res) => {
     const seg2 = Math.floor(effectiveAudioMs / 3);
     const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
 
-    // Subtitle dock: bottom 25% (no background overlay)
-    const dockH = Math.round(h * 0.25);
-    const dockY = h - dockH;
+    // Subtitle dock: bottom 25% + safe padding
+    const dockHeight = Math.round(h * 0.25);
 
-    // Safe padding inside dock
-    const padLR = Math.round(w * 0.07);
-    const padBottom = Math.round(dockH * 0.14);
+    // Keep safe sides, but push captions lower + smaller
+    const padLR = Math.round(w * 0.06); // keep
+    const padBottom = Math.round(h * 0.035); // LOWER: smaller margin -> closer to bottom
 
-    // Smaller typography (aim max 2 lines)
-    const fontSize = Math.max(22, Math.round(h * 0.013));
-    const lineSpacing = 4;
+    const marginV = Math.max(0, padBottom);
+    const marginL = Math.max(0, padLR);
+    const marginR = Math.max(0, padLR);
 
-    // IMPORTANT:
-    // We burn subtitles onto a transparent layer sized to the dock (so they can never exceed dock),
-    // then overlay that layer ON TOP of the full-screen image slideshow.
-    // That guarantees: subtitles visible + always within bottom 25%.
+    // Smaller font
+    const fontSize = Math.max(22, Math.round(h * 0.014)); // smaller than before
+    const outline = 2;
+    const spacing = 6;
+
+    const srtEsc = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+
+    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+
     const subtitleStyle = [
       `FontName=Arial`,
       `FontSize=${fontSize}`,
       `PrimaryColour=&H00FFFFFF`,
       `OutlineColour=&H00000000`,
       `BorderStyle=1`,
-      `Outline=2`,
+      `Outline=${outline}`,
       `Shadow=0`,
       `Alignment=2`,
-      `MarginV=${padBottom}`,
-      `MarginL=${padLR}`,
-      `MarginR=${padLR}`,
-      `Spacing=${lineSpacing}`
+      `MarginV=${marginV}`,
+      `MarginL=${marginL}`,
+      `MarginR=${marginR}`,
+      `Spacing=${spacing}`
     ].join(",");
 
-    const srtEsc = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
-
-    // Full-screen images (cover + crop)
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+    // Dock band for readability (unchanged)
+    const dockY = h - dockHeight;
+    const dockAlpha = 0.35;
+    const dockColor = "black";
 
     const filter = [
       `[0:v]${coverCrop}[v0]`,
@@ -284,35 +303,64 @@ app.post("/render", async (req, res) => {
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      // Transparent dock layer (RGBA). No drawbox, no darkening.
-      `color=c=black@0.0:s=${w}x${dockH}:r=${fps},format=rgba[subbase]`,
-      `[subbase]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subdock]`,
+      `[slideshow]drawbox=x=0:y=${dockY}:w=${w}:h=${dockHeight}:color=${dockColor}@${dockAlpha}:t=fill[slideshow_docked]`,
 
-      // Overlay subtitles ON TOP of slideshow, positioned at bottom (dockY)
-      `[slideshow][subdock]overlay=0:${dockY}:format=auto[slideshow_subbed]`,
+      `[slideshow_docked]subtitles=${srtEsc}:force_style='${subtitleStyle}'[subbed]`,
 
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
-      `[slideshow_subbed][endcard]concat=n=2:v=1:a=0[vout]`
+
+      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ].join(";");
 
     const args = [
       "-y",
-      "-loop", "1", "-t", (seg1 / 1000).toFixed(3), "-i", img1Path,
-      "-loop", "1", "-t", (seg2 / 1000).toFixed(3), "-i", img2Path,
-      "-loop", "1", "-t", (seg3 / 1000).toFixed(3), "-i", img3Path,
-      "-loop", "1", "-t", (Number(end_card_duration_ms) / 1000).toFixed(3), "-i", endPath,
-      "-i", audioPath,
-      "-filter_complex", filter,
-      "-map", "[vout]",
-      "-map", "4:a",
-      "-r", String(fps),
+      "-loop",
+      "1",
+      "-t",
+      (seg1 / 1000).toFixed(3),
+      "-i",
+      img1Path,
+      "-loop",
+      "1",
+      "-t",
+      (seg2 / 1000).toFixed(3),
+      "-i",
+      img2Path,
+      "-loop",
+      "1",
+      "-t",
+      (seg3 / 1000).toFixed(3),
+      "-i",
+      img3Path,
+      "-loop",
+      "1",
+      "-t",
+      (Number(end_card_duration_ms) / 1000).toFixed(3),
+      "-i",
+      endPath,
+      "-i",
+      audioPath,
+      "-filter_complex",
+      filter,
+      "-map",
+      "[vout]",
+      "-map",
+      "4:a",
+      "-r",
+      String(fps),
       "-shortest",
-      "-c:v", "libx264",
-      "-pix_fmt", "yuv420p",
-      "-profile:v", "high",
-      "-level", "4.1",
-      "-c:a", "aac",
-      "-b:a", "192k",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-profile:v",
+      "high",
+      "-level",
+      "4.1",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
       outPath
     ];
 
