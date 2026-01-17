@@ -2,8 +2,8 @@ import express from "express";
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import { execFile } from "child_process";
 import { promisify } from "util";
+import { execFile } from "child_process";
 import tmp from "tmp";
 
 const execFileAsync = promisify(execFile);
@@ -26,130 +26,117 @@ function ensureArray(val, name) {
   if (!Array.isArray(val)) throw new Error(`${name} must be an array`);
 }
 
-function wrapToTwoLines(text, maxCharsPerLine = 30) {
-  const t = String(text || "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-  if (t.length <= maxCharsPerLine) return t;
+function msToSrtTime(msIn) {
+  let ms = Math.max(0, Math.round(Number(msIn) || 0));
+  const h = Math.floor(ms / 3600000);
+  ms -= h * 3600000;
+  const m = Math.floor(ms / 60000);
+  ms -= m * 60000;
+  const s = Math.floor(ms / 1000);
+  const ms2 = ms - s * 1000;
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms2).padStart(3, "0")}`;
+}
 
-  const words = t.split(" ");
-  let line1 = "";
-  let i = 0;
-
-  while (i < words.length) {
-    const cand = line1 ? `${line1} ${words[i]}` : words[i];
-    if (cand.length <= maxCharsPerLine) {
-      line1 = cand;
-      i += 1;
-    } else {
-      break;
-    }
-  }
-
-  if (!line1) {
-    return t.slice(0, maxCharsPerLine - 1) + "…";
-  }
-
-  const rest = words.slice(i).join(" ").trim();
-  if (!rest) return line1;
-
-  let line2 = rest;
-  if (line2.length > maxCharsPerLine) {
-    line2 = line2.slice(0, maxCharsPerLine - 1).trimEnd() + "…";
-  }
-
-  return `${line1}\n${line2}`;
+function sanitizeCaptionText(input) {
+  // Fix the "\n" (backslash-n) or actual newlines showing up as "n" / broken spacing in subtitles.
+  // We force everything into a single line per cue and let ffmpeg handle wrapping naturally.
+  return String(input ?? "")
+    .replace(/\r\n/g, " ")
+    .replace(/\r/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/\\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeAndScaleCaptions(captions, audioMs) {
-  if (!Array.isArray(captions)) return [];
+  // captions: [{start_ms, end_ms, text}]
+  // Scale total captions to audio duration proportionally, then sanitize to be continuous and end exactly at audioMs.
+  if (!Array.isArray(captions) || captions.length === 0) return [];
 
-  const items = [];
-  for (const c of captions) {
-    const start = Number(c?.start_ms);
-    const end = Number(c?.end_ms);
-    const txt = String(c?.text || "").trim();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
-    items.push({ dur_ms: end - start, text: txt });
+  const cleaned = captions
+    .map((c) => ({
+      start_ms: Number(c?.start_ms),
+      end_ms: Number(c?.end_ms),
+      text: sanitizeCaptionText(c?.text),
+    }))
+    .filter(
+      (c) =>
+        Number.isFinite(c.start_ms) &&
+        Number.isFinite(c.end_ms) &&
+        c.end_ms > c.start_ms &&
+        c.text
+    )
+    .sort((a, b) => a.start_ms - b.start_ms);
+
+  if (cleaned.length === 0) return [];
+
+  const lastEnd = Math.max(...cleaned.map((c) => c.end_ms));
+  const captionsMs = Number.isFinite(lastEnd) && lastEnd > 0 ? lastEnd : 0;
+
+  // If we can't read audio duration, return cleaned as-is (still text-sanitized).
+  if (!Number.isFinite(audioMs) || audioMs <= 0 || captionsMs <= 0) {
+    // Also re-stitch to avoid overlaps/holes if input is messy
+    let t = 0;
+    const minSeg = 250; // ms
+    return cleaned.map((c) => {
+      const dur = Math.max(minSeg, Math.round(c.end_ms - c.start_ms));
+      const out = { start_ms: t, end_ms: t + dur, text: c.text };
+      t = out.end_ms;
+      return out;
+    });
   }
-  if (items.length === 0) return [];
 
-  if (!Number.isFinite(audioMs) || audioMs <= 0) {
-    const out = [];
-    let cur = 0;
-    for (const it of items) {
-      const dur = Math.max(1, Math.round(it.dur_ms));
-      out.push({ start_ms: cur, end_ms: cur + dur, text: it.text });
-      cur += dur;
-    }
-    return out;
+  const scale = audioMs / captionsMs;
+
+  // Scale starts/ends
+  const scaled = cleaned.map((c) => ({
+    start_ms: Math.round(c.start_ms * scale),
+    end_ms: Math.round(c.end_ms * scale),
+    text: c.text,
+  }));
+
+  // Sanitize: continuous, monotonic, min duration, last ends exactly at audioMs
+  const minSeg = 250; // ms (prevents tiny segments collapsing)
+  let cursor = 0;
+
+  for (let i = 0; i < scaled.length; i++) {
+    const c = scaled[i];
+    let dur = Math.max(minSeg, c.end_ms - c.start_ms);
+    c.start_ms = cursor;
+    c.end_ms = cursor + dur;
+    cursor = c.end_ms;
   }
 
-  const totalDur = items.reduce((acc, it) => acc + Math.max(1, Math.round(it.dur_ms)), 0);
-  if (totalDur <= 0) return [];
-
-  const factor = audioMs / totalDur;
-
-  const n = items.length;
-  let minSegMs = 600;
-  const maxPossibleMin = Math.floor(audioMs / n);
-  if (maxPossibleMin <= 0) minSegMs = 80;
-  else if (minSegMs > maxPossibleMin) minSegMs = Math.max(80, maxPossibleMin);
-
-  const scaled = items.map((it) => {
-    const d = Math.max(1, Math.round(it.dur_ms));
-    return { text: it.text, dur_ms: Math.max(minSegMs, Math.round(d * factor)) };
-  });
-
-  let sum = scaled.reduce((acc, x) => acc + x.dur_ms, 0);
-
-  if (sum > audioMs) {
-    let over = sum - audioMs;
-    const idx = scaled
-      .map((x, i) => ({ i, d: x.dur_ms }))
-      .sort((a, b) => b.d - a.d)
-      .map((x) => x.i);
-
-    for (const i of idx) {
-      if (over <= 0) break;
-      const canReduce = Math.max(0, scaled[i].dur_ms - minSegMs);
-      const reduceBy = Math.min(canReduce, over);
-      scaled[i].dur_ms -= reduceBy;
-      over -= reduceBy;
+  // If we overshoot or undershoot, redistribute proportionally by durations
+  const total = cursor;
+  if (total !== audioMs && total > 0) {
+    const factor = audioMs / total;
+    cursor = 0;
+    for (let i = 0; i < scaled.length; i++) {
+      const dur = Math.max(minSeg, Math.round((scaled[i].end_ms - scaled[i].start_ms) * factor));
+      scaled[i].start_ms = cursor;
+      scaled[i].end_ms = cursor + dur;
+      cursor = scaled[i].end_ms;
     }
+  }
 
-    if (over > 0) {
-      for (let i = scaled.length - 1; i >= 0 && over > 0; i--) {
-        const canReduce = Math.max(0, scaled[i].dur_ms - 1);
-        const reduceBy = Math.min(canReduce, over);
-        scaled[i].dur_ms -= reduceBy;
-        over -= reduceBy;
+  // Hard clamp last to audioMs, and ensure non-decreasing
+  if (scaled.length > 0) {
+    scaled[0].start_ms = 0;
+    for (let i = 1; i < scaled.length; i++) {
+      if (scaled[i].start_ms !== scaled[i - 1].end_ms) {
+        scaled[i].start_ms = scaled[i - 1].end_ms;
+      }
+      if (scaled[i].end_ms <= scaled[i].start_ms) {
+        scaled[i].end_ms = scaled[i].start_ms + minSeg;
       }
     }
-  } else if (sum < audioMs) {
-    scaled[scaled.length - 1].dur_ms += audioMs - sum;
+    scaled[scaled.length - 1].end_ms = audioMs;
   }
 
-  const out = [];
-  let cur = 0;
-  for (let i = 0; i < scaled.length; i++) {
-    const dur = Math.max(1, Math.round(scaled[i].dur_ms));
-    const start_ms = cur;
-    const end_ms = i === scaled.length - 1 ? audioMs : start_ms + dur;
-    out.push({ start_ms, end_ms, text: scaled[i].text });
-    cur = end_ms;
-  }
-  if (out.length) out[out.length - 1].end_ms = audioMs;
-
-  return out;
-}
-
-function escDrawtext(t) {
-  return String(t || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'")
-    .replace(/%/g, "\\%")
-    .replace(/\n/g, "\\n");
+  return scaled;
 }
 
 app.post("/render", async (req, res) => {
@@ -159,7 +146,7 @@ app.post("/render", async (req, res) => {
     captions,
     end_card_url,
     end_card_duration_ms = 4000,
-    video = { width: 1080, height: 1920, fps: 30 }
+    video = { width: 1080, height: 1920, fps: 30 },
   } = req.body || {};
 
   try {
@@ -176,6 +163,7 @@ app.post("/render", async (req, res) => {
     const img2Path = path.join(workDir, "img2.png");
     const img3Path = path.join(workDir, "img3.png");
     const endPath = path.join(workDir, "end.png");
+    const srtPath = path.join(workDir, "captions.srt");
     const outPath = path.join(workDir, "out.mp4");
 
     await downloadToFile(audio_url, audioPath);
@@ -184,7 +172,8 @@ app.post("/render", async (req, res) => {
     await downloadToFile(images[2], img3Path);
     await downloadToFile(end_card_url, endPath);
 
-    let audioMs = NaN;
+    // Audio duration (ms)
+    let audioMs = 0;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
         "-v",
@@ -193,113 +182,98 @@ app.post("/render", async (req, res) => {
         "format=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
-        audioPath
+        audioPath,
       ]);
-      const audioSeconds = parseFloat(String(probeOut || "").trim());
-      if (Number.isFinite(audioSeconds) && audioSeconds > 0) audioMs = Math.round(audioSeconds * 1000);
+      const audioSeconds = parseFloat(String(probeOut).trim());
+      if (Number.isFinite(audioSeconds) && audioSeconds > 0) {
+        audioMs = Math.round(audioSeconds * 1000);
+      }
     } catch (_e) {
-      audioMs = NaN;
+      audioMs = 0;
     }
+
+    // Scale + sanitize captions to match audio, and also fix "\n" artifacts
+    const finalCaptions = normalizeAndScaleCaptions(captions, audioMs);
+
+    // Write SRT
+    const srtLines = [];
+    finalCaptions.forEach((c, i) => {
+      const start = Number(c.start_ms);
+      const end = Number(c.end_ms);
+      const text = sanitizeCaptionText(c.text);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text) return;
+      srtLines.push(String(i + 1));
+      srtLines.push(`${msToSrtTime(start)} --> ${msToSrtTime(end)}`);
+      srtLines.push(text);
+      srtLines.push("");
+    });
+    fs.writeFileSync(srtPath, srtLines.join("\n"), "utf8");
 
     const w = Number(video.width || 1080);
     const h = Number(video.height || 1920);
     const fps = Number(video.fps || 30);
 
-    const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
+    const endMs = Number(end_card_duration_ms || 4000);
+    const endSec = Math.max(0.1, endMs / 1000);
 
-    let effectiveAudioMs = audioMs;
-    if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
-      const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
-      effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
-    }
+    // Slideshow durations (audio split in 3)
+    const aMs = Math.max(0, audioMs);
+    const seg1 = Math.floor(aMs / 3);
+    const seg2 = Math.floor(aMs / 3);
+    const seg3 = Math.max(0, aMs - seg1 - seg2);
 
-    const seg1 = Math.floor(effectiveAudioMs / 3);
-    const seg2 = Math.floor(effectiveAudioMs / 3);
-    const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
+    // Subtitle styling:
+    // - No background bar (no drawbox, no subtitle background)
+    // - Bottom-center alignment, moved up into the ~78%-89% band via MarginV ≈ h*0.16
+    // - Increase size by +50% vs previous (+50% again): set around 99-100 for 1080x1920
+    const marginV = Math.round(h * 0.16); // ~300 at 1920 height (puts baseline around 84%)
+    const fontSize = 100; // ~+50% from ~66; adjust if needed
 
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+    // Escape path for ffmpeg subtitles filter
+    const escSrtPath = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 
-    // === CAPTION VISUALS (INCREASED +50%) ===
-    const fontSizeBase = Math.max(14, Math.round(h * 0.009));
-    const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // +50%
-    const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
-    const borderW = 2;
+    const filter = [
+      `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v0]`,
+      `[1:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v1]`,
+      `[2:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v2]`,
+      `[3:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v3]`,
 
-    // Center around 84% height: y = (h*0.84) - (text_h/2)
-    const yExpr = `(h*0.84)-(text_h/2)`;
-    const xExpr = `(w-text_w)/2`;
-    // =======================================
+      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[a0]`,
+      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[a1]`,
+      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[a2]`,
+      `[a0][a1][a2]concat=n=3:v=1:a=0[slideshow]`,
 
-    const drawtexts = scaledCaptions.map((c) => {
-      const start = (Number(c.start_ms) / 1000).toFixed(3);
-      const end = (Number(c.end_ms) / 1000).toFixed(3);
-      const wrapped = wrapToTwoLines(c.text, 30);
-      const safeText = escDrawtext(wrapped);
+      // Burn subtitles on slideshow only (no background). Keep bottom-center, move up via MarginV.
+      `[slideshow]subtitles=${escSrtPath}:force_style='FontName=Arial,FontSize=${fontSize},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,Bold=0,Italic=0,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=${marginV},MarginL=120,MarginR=120'[subbed]`,
 
-      return (
-        `drawtext=` +
-        `font=DejaVuSans:` +
-        `text='${safeText}':` +
-        `fontsize=${fontSize}:` +
-        `fontcolor=white:` +
-        `borderw=${borderW}:` +
-        `bordercolor=black@1:` +
-        `line_spacing=${lineSpacing}:` +
-        `x=${xExpr}:` +
-        `y=${yExpr}:` +
-        `enable='between(t,${start},${end})'`
-      );
-    });
-
-    const filterParts = [
-      `[0:v]${coverCrop}[v0]`,
-      `[1:v]${coverCrop}[v1]`,
-      `[2:v]${coverCrop}[v2]`,
-      `[3:v]${coverCrop}[v3]`,
-
-      `[v0]trim=duration=${seg1 / 1000},setpts=PTS-STARTPTS[s0]`,
-      `[v1]trim=duration=${seg2 / 1000},setpts=PTS-STARTPTS[s1]`,
-      `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
-      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`
-    ];
-
-    if (drawtexts.length) {
-      filterParts.push(`[slideshow]${drawtexts.join(",")}[subbed]`);
-    } else {
-      filterParts.push(`[slideshow]setpts=PTS-STARTPTS[subbed]`);
-    }
-
-    filterParts.push(
-      `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
-      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
-    );
-
-    const filter = filterParts.join(";");
+      `[v3]trim=duration=${endSec.toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
+      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`,
+    ].join(";");
 
     const args = [
       "-y",
       "-loop",
       "1",
       "-t",
-      (seg1 / 1000).toFixed(3),
+      (Math.max(0.1, seg1 / 1000)).toFixed(3),
       "-i",
       img1Path,
       "-loop",
       "1",
       "-t",
-      (seg2 / 1000).toFixed(3),
+      (Math.max(0.1, seg2 / 1000)).toFixed(3),
       "-i",
       img2Path,
       "-loop",
       "1",
       "-t",
-      (seg3 / 1000).toFixed(3),
+      (Math.max(0.1, seg3 / 1000)).toFixed(3),
       "-i",
       img3Path,
       "-loop",
       "1",
       "-t",
-      (Number(end_card_duration_ms) / 1000).toFixed(3),
+      endSec.toFixed(3),
       "-i",
       endPath,
       "-i",
@@ -317,15 +291,11 @@ app.post("/render", async (req, res) => {
       "libx264",
       "-pix_fmt",
       "yuv420p",
-      "-profile:v",
-      "high",
-      "-level",
-      "4.1",
       "-c:a",
       "aac",
       "-b:a",
       "192k",
-      outPath
+      outPath,
     ];
 
     await execFileAsync("ffmpeg", args);
