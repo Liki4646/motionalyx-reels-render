@@ -28,9 +28,6 @@ function ensureArray(val, name) {
 
 // OPTION 1: wrap to max 2 lines + ellipsis
 function wrapToTwoLines(text, maxCharsPerLine = 26) {
-  // Keep meaning, but make it safe for wrapping:
-  // - treat both real newlines and literal "\n" as spaces before wrapping
-  // - collapse whitespace so line lengths are predictable
   const t = String(text || "")
     .replace(/\\r\\n|\\n/g, " ")
     .replace(/\r\n|\n/g, " ")
@@ -152,13 +149,11 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-// IMPORTANT FIX:
-// - Escape for FFmpeg drawtext parsing
-// - Encode real newlines as "\\n" (double backslash) so FFmpeg renders a line break
+// FIX: newline must become "\n" (single backslash), NOT "\\n"
 function escDrawtext(t) {
   let s = String(t || "");
 
-  // If input contains literal "\n" or "\r\n" sequences, interpret them as actual newlines.
+  // Interpret literal "\n" / "\r\n" sequences as actual newlines
   s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
 
   return s
@@ -166,7 +161,8 @@ function escDrawtext(t) {
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'")
     .replace(/%/g, "\\%")
-    .replace(/\n/g, "\\\\n");
+    // IMPORTANT: one backslash + n
+    .replace(/\n/g, "\\n");
 }
 
 app.post("/render", async (req, res) => {
@@ -242,16 +238,13 @@ app.post("/render", async (req, res) => {
     const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
     const borderW = 2;
 
-    // Center around 84% height: y = (h*0.84) - (text_h/2)
     const yExpr = `(h*0.84)-(text_h/2)`;
     const xExpr = `(w-text_w)/2`;
-    // ==============================================
 
     const drawtexts = scaledCaptions.map((c) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
       const end = (Number(c.end_ms) / 1000).toFixed(3);
 
-      // OPTION 1: Wrap to 2 lines + ellipsis
       const wrapped = wrapToTwoLines(c.text, 26);
       const safeText = escDrawtext(wrapped);
 
