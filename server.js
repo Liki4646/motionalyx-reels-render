@@ -143,7 +143,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-// Escape for ffmpeg drawtext "text="
 function escDrawtext(t) {
   return String(t || "")
     .replace(/\\/g, "\\\\")
@@ -185,7 +184,6 @@ app.post("/render", async (req, res) => {
     await downloadToFile(images[2], img3Path);
     await downloadToFile(end_card_url, endPath);
 
-    // Audio duration
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
@@ -221,16 +219,16 @@ app.post("/render", async (req, res) => {
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // === CAPTION VISUALS (UPDATED PER REQUEST) ===
-    const fontSize = Math.max(14, Math.round(h * 0.009)); // ~1.5x vs previous
+    // === CAPTION VISUALS (INCREASED +50%) ===
+    const fontSizeBase = Math.max(14, Math.round(h * 0.009));
+    const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // +50%
     const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
     const borderW = 2;
 
-    // Center the caption block around 84% height:
-    // y = (h*0.84) - (text_h/2)
+    // Center around 84% height: y = (h*0.84) - (text_h/2)
     const yExpr = `(h*0.84)-(text_h/2)`;
     const xExpr = `(w-text_w)/2`;
-    // ============================================
+    // =======================================
 
     const drawtexts = scaledCaptions.map((c) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
@@ -265,7 +263,6 @@ app.post("/render", async (req, res) => {
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`
     ];
 
-    // No dark background band (drawbox removed). Apply captions directly.
     if (drawtexts.length) {
       filterParts.push(`[slideshow]${drawtexts.join(",")}[subbed]`);
     } else {
