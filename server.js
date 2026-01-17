@@ -73,7 +73,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   }
   if (items.length === 0) return [];
 
-  // Fallback: keep original durations chained
   if (!Number.isFinite(audioMs) || audioMs <= 0) {
     const out = [];
     let cur = 0;
@@ -216,38 +215,23 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // 3-image slideshow durations
     const seg1 = Math.floor(effectiveAudioMs / 3);
     const seg2 = Math.floor(effectiveAudioMs / 3);
     const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
 
-    // --- SUBTITLE VISUALS (ONLY CHANGES HERE) ---
-    // Bottom 25% dock
-    const dockHeight = Math.round(h * 0.25);
-    const dockY = h - dockHeight;
+    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // Push captions INTO the dock, near bottom
-    const padLR = Math.round(w * 0.07);
-    const padBottom = Math.round(h * 0.02); // closer to bottom (inside dock)
-
-    // MUCH smaller font (target ~80%+ smaller vs previous perceived size)
-    const fontSize = Math.max(10, Math.round(h * 0.006)); // ~12 on 1920px height
+    // === CAPTION VISUALS (UPDATED PER REQUEST) ===
+    const fontSize = Math.max(14, Math.round(h * 0.009)); // ~1.5x vs previous
     const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
     const borderW = 2;
 
-    // Caption baseline y position (kept inside the dark dock)
-    // bottom aligned: y = h - padBottom - text_h
-    const yExpr = `h-${padBottom}-text_h`;
+    // Center the caption block around 84% height:
+    // y = (h*0.84) - (text_h/2)
+    const yExpr = `(h*0.84)-(text_h/2)`;
     const xExpr = `(w-text_w)/2`;
+    // ============================================
 
-    // Dark dock (keep)
-    const dockAlpha = 0.35;
-    const dockColor = "black";
-    // -------------------------------------------
-
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
-
-    // Build drawtext chain (applies ONLY on slideshow part)
     const drawtexts = scaledCaptions.map((c) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
       const end = (Number(c.end_ms) / 1000).toFixed(3);
@@ -269,9 +253,7 @@ app.post("/render", async (req, res) => {
       );
     });
 
-    const drawChain = drawtexts.length ? "," + drawtexts.join(",") : "";
-
-    const filter = [
+    const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
       `[2:v]${coverCrop}[v2]`,
@@ -280,16 +262,22 @@ app.post("/render", async (req, res) => {
       `[v0]trim=duration=${seg1 / 1000},setpts=PTS-STARTPTS[s0]`,
       `[v1]trim=duration=${seg2 / 1000},setpts=PTS-STARTPTS[s1]`,
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
-      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
+      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`
+    ];
 
-      `[slideshow]drawbox=x=0:y=${dockY}:w=${w}:h=${dockHeight}:color=${dockColor}@${dockAlpha}:t=fill[slideshow_docked]`,
+    // No dark background band (drawbox removed). Apply captions directly.
+    if (drawtexts.length) {
+      filterParts.push(`[slideshow]${drawtexts.join(",")}[subbed]`);
+    } else {
+      filterParts.push(`[slideshow]setpts=PTS-STARTPTS[subbed]`);
+    }
 
-      `[slideshow_docked]${drawChain.slice(1)}[subbed]`, // slice(1) removes the leading comma added above
-
+    filterParts.push(
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
-
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
-    ].join(";");
+    );
+
+    const filter = filterParts.join(";");
 
     const args = [
       "-y",
