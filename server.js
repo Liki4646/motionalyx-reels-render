@@ -26,46 +26,6 @@ function ensureArray(val, name) {
   if (!Array.isArray(val)) throw new Error(`${name} must be an array`);
 }
 
-function wrapToTwoLines(text, maxCharsPerLine = 30) {
-  // FIX: convert literal "\n" sequences to a normal space (A variant),
-  // so we don't get "n" glued into words when escaping for drawtext.
-  const t = String(text || "")
-    .replace(/\\r\\n|\\n/g, " ") // <-- FIX HERE (A variant)
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!t) return "";
-  if (t.length <= maxCharsPerLine) return t;
-
-  const words = t.split(" ");
-  let line1 = "";
-  let i = 0;
-
-  while (i < words.length) {
-    const cand = line1 ? `${line1} ${words[i]}` : words[i];
-    if (cand.length <= maxCharsPerLine) {
-      line1 = cand;
-      i += 1;
-    } else {
-      break;
-    }
-  }
-
-  if (!line1) {
-    return t.slice(0, maxCharsPerLine - 1) + "…";
-  }
-
-  const rest = words.slice(i).join(" ").trim();
-  if (!rest) return line1;
-
-  let line2 = rest;
-  if (line2.length > maxCharsPerLine) {
-    line2 = line2.slice(0, maxCharsPerLine - 1).trimEnd() + "…";
-  }
-
-  return `${line1}\n${line2}`;
-}
-
 function normalizeAndScaleCaptions(captions, audioMs) {
   if (!Array.isArray(captions)) return [];
 
@@ -73,13 +33,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   for (const c of captions) {
     const start = Number(c?.start_ms);
     const end = Number(c?.end_ms);
-
-    // EXTRA robustness: also normalize any literal "\n" in raw input
-    // so it never leaks into words.
-    const txt = String(c?.text || "")
-      .replace(/\\r\\n|\\n/g, " ")
-      .trim();
-
+    const txt = String(c?.text || "").trim();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
     items.push({ dur_ms: end - start, text: txt });
   }
@@ -155,13 +109,25 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
+// IMPORTANT FIX:
+// - Do NOT alter caption text content (no wrapping, no whitespace normalization).
+// - But we must escape for FFmpeg drawtext parsing.
+// - And we must encode real newlines as "\\n" (double backslash) so FFmpeg renders a line break
+//   instead of eating "\" and leaving "n" in the text.
 function escDrawtext(t) {
-  return String(t || "")
+  let s = String(t || "");
+
+  // If input contains literal "\n" or "\r\n" sequences, interpret them as actual newlines.
+  // This preserves intent without changing words/spaces.
+  s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
+
+  return s
     .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'")
     .replace(/%/g, "\\%")
-    .replace(/\n/g, "\\n");
+    // FFmpeg drawtext newline requires \\n (double backslash) inside filter string
+    .replace(/\n/g, "\\\\n");
 }
 
 app.post("/render", async (req, res) => {
@@ -245,8 +211,9 @@ app.post("/render", async (req, res) => {
     const drawtexts = scaledCaptions.map((c) => {
       const start = (Number(c.start_ms) / 1000).toFixed(3);
       const end = (Number(c.end_ms) / 1000).toFixed(3);
-      const wrapped = wrapToTwoLines(c.text, 30);
-      const safeText = escDrawtext(wrapped);
+
+      // IMPORTANT: Use caption text exactly as provided (no wrapping/normalizing).
+      const safeText = escDrawtext(c.text);
 
       return (
         `drawtext=` +
