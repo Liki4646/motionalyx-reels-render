@@ -145,7 +145,6 @@ function wrapAssToMaxLines(text, maxCharsPerLine = 26, maxLines = 3) {
     return lines.join("\\N");
   }
 
-  // Too many lines: keep first maxLines-1 lines, merge the rest into the last line (no truncation)
   const out = lines.slice(0, maxLines - 1);
   const rest = lines.slice(maxLines - 1).join(" ");
   out.push(rest);
@@ -154,8 +153,6 @@ function wrapAssToMaxLines(text, maxCharsPerLine = 26, maxLines = 3) {
 }
 
 function escAssText(t) {
-  // Keep text natural; escape only ASS control chars.
-  // Note: we keep the inserted \N from wrapAssToMaxLines.
   return String(t ?? "")
     .replace(/\r\n/g, " ")
     .replace(/\n/g, " ")
@@ -164,16 +161,19 @@ function escAssText(t) {
 }
 
 function buildAss(captions, w, h) {
-  // Your sizing: base 40 * 1.5 => 60
-  const fontSizeBase = 40;
-  const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 60
+  // CHANGED: slightly larger base to improve readability (+~20-30%)
+  // 48 * 1.5 => 72
+  const fontSizeBase = 48;
+  const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 72
 
   const marginLR = Math.round(w * 0.10); // 10% left/right margins
   const marginV = Math.round(h * 0.16); // position near your red zone (~84% height)
 
-  // Wrap tuned for big font + 10% margins
   const maxCharsPerLine = 26;
   const maxLines = 3;
+
+  // CHANGED: outline slightly thicker for readability on light backgrounds
+  const outline = 3;
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -184,7 +184,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,${marginLR},${marginLR},${marginV},1
+Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -206,7 +206,6 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 }
 
 function escFilterPath(p) {
-  // Escape for FFmpeg filter args inside -filter_complex
   return String(p)
     .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
