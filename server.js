@@ -141,10 +141,12 @@ function wrapAssToMaxLines(text, maxCharsPerLine = 26, maxLines = 3) {
   }
   if (current) lines.push(current);
 
+  // Allow up to maxLines WITHOUT truncation.
   if (lines.length <= maxLines) {
     return lines.join("\\N");
   }
 
+  // If somehow more than maxLines, just keep splitting into maxLines by packing the remainder into last line (no ellipsis).
   const out = lines.slice(0, maxLines - 1);
   const rest = lines.slice(maxLines - 1).join(" ");
   out.push(rest);
@@ -160,23 +162,30 @@ function escAssText(t) {
     .replace(/}/g, "\\}");
 }
 
-function buildAss(captions, w, h, hookText) {
-  // captions (bottom): 48 * 1.5 => 72
-  const fontSizeBase = 48;
+function buildAss(captions, w, h) {
+  // Bottom captions (keep as you have them)
+  const fontSizeBase = 48; // (was 40, increased earlier)
   const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 72
 
-  // hook (top): smaller + subtle
-  const hookFontSize = 56;
+  // Title (Segment 1) big + bold in the middle
+  const titleFontSize = 96;
+  const titleOutline = 4;
 
   const marginLR = Math.round(w * 0.10); // 10% left/right margins
   const marginV = Math.round(h * 0.16); // bottom captions placement
-  const hookMarginV = Math.round(h * 0.08); // top placement
 
   const maxCharsPerLine = 26;
   const maxLines = 3;
 
-  const outline = 3; // captions outline
-  const hookOutline = 2; // hook outline (a bit lighter)
+  // Title wraps a bit wider and up to 2 lines (clean headline feel)
+  const titleMaxCharsPerLine = 28;
+  const titleMaxLines = 2;
+
+  const outline = 3;
+
+  // Place title around upper-middle (slightly above true center)
+  const titlePosX = Math.round(w * 0.5);
+  const titlePosY = Math.round(h * 0.44);
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -188,7 +197,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
-Style: Hook,DejaVu Sans,${hookFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${hookOutline},0,8,${marginLR},${marginLR},${hookMarginV},1
+Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,5,${marginLR},${marginLR},0,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -196,22 +205,22 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 
   const lines = [];
 
-  // Hook shows for first 2.00s only
-  const ht = String(hookText || "").trim();
-  if (ht) {
-    const hookSafe = escAssText(ht);
-    lines.push(`Dialogue: 1,0:00:00.00,0:00:02.00,Hook,,0,0,0,,${hookSafe}`);
-  }
-
-  // Captions
-  for (const c of captions || []) {
+  for (let i = 0; i < (captions || []).length; i++) {
+    const c = captions[i];
     const start = msToAssTime(c.start_ms);
     const end = msToAssTime(c.end_ms);
 
-    const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
-    const text = escAssText(wrapped);
-
-    lines.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`);
+    if (i === 0) {
+      const wrappedTitle = wrapAssToMaxLines(c.text, titleMaxCharsPerLine, titleMaxLines);
+      const text = escAssText(wrappedTitle);
+      // \pos for precise center placement, alignment=5 (center)
+      const override = `{\\pos(${titlePosX},${titlePosY})}`;
+      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${override}${text}`);
+    } else {
+      const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
+      const text = escAssText(wrapped);
+      lines.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`);
+    }
   }
 
   return header + lines.join("\n") + "\n";
@@ -230,7 +239,6 @@ app.post("/render", async (req, res) => {
     audio_url,
     images,
     captions,
-    hook_text, // <-- NEW
     end_card_url,
     end_card_duration_ms = 4000,
     video = { width: 1080, height: 1920, fps: 30 }
@@ -294,7 +302,7 @@ app.post("/render", async (req, res) => {
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const assPath = path.join(workDir, "captions.ass");
-    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h, hook_text), "utf8");
+    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h), "utf8");
     const assForFfmpeg = escFilterPath(assPath);
 
     const filterParts = [
