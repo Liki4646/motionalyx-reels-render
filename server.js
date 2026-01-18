@@ -122,47 +122,40 @@ function msToAssTime(ms) {
   return `${h}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
 }
 
-// Force 2-line wrapping (no \n hacks). We insert ASS newline \N.
-function wrapAssTwoLines(text, maxCharsPerLine = 26) {
+function wrapAssToMaxLines(text, maxCharsPerLine = 26, maxLines = 3) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   if (!t) return "";
 
-  if (t.length <= maxCharsPerLine) return t;
-
   const words = t.split(" ");
-  let line1 = "";
-  let i = 0;
+  const lines = [];
+  let current = "";
 
-  while (i < words.length) {
-    const cand = line1 ? `${line1} ${words[i]}` : words[i];
+  for (const w of words) {
+    const cand = current ? `${current} ${w}` : w;
     if (cand.length <= maxCharsPerLine) {
-      line1 = cand;
-      i += 1;
+      current = cand;
     } else {
-      break;
+      if (current) lines.push(current);
+      current = w;
     }
   }
+  if (current) lines.push(current);
 
-  if (!line1) {
-    // single super-long word: hard truncate
-    return t.slice(0, Math.max(1, maxCharsPerLine - 1)) + "…";
+  if (lines.length <= maxLines) {
+    return lines.join("\\N");
   }
 
-  const rest = words.slice(i).join(" ").trim();
-  if (!rest) return line1;
+  // Too many lines: keep first maxLines-1 lines, merge the rest into the last line (no truncation)
+  const out = lines.slice(0, maxLines - 1);
+  const rest = lines.slice(maxLines - 1).join(" ");
+  out.push(rest);
 
-  let line2 = rest;
-  if (line2.length > maxCharsPerLine) {
-    line2 = line2.slice(0, Math.max(1, maxCharsPerLine - 1)).trimEnd() + "…";
-  }
-
-  // ASS newline is \N (in JS string must be \\N)
-  return `${line1}\\N${line2}`;
+  return out.join("\\N");
 }
 
 function escAssText(t) {
-  // Escape only ASS control chars. Keep content otherwise natural.
-  // Note: we intentionally keep the inserted \N from wrapAssTwoLines.
+  // Keep text natural; escape only ASS control chars.
+  // Note: we keep the inserted \N from wrapAssToMaxLines.
   return String(t ?? "")
     .replace(/\r\n/g, " ")
     .replace(/\n/g, " ")
@@ -175,11 +168,12 @@ function buildAss(captions, w, h) {
   const fontSizeBase = 40;
   const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 60
 
-  const marginLR = Math.round(w * 0.10); // 10% left/right
-  const marginV = Math.round(h * 0.16); // aligns around your red zone
+  const marginLR = Math.round(w * 0.10); // 10% left/right margins
+  const marginV = Math.round(h * 0.16); // position near your red zone (~84% height)
 
-  // Wrap threshold tuned for big font + 10% margins
+  // Wrap tuned for big font + 10% margins
   const maxCharsPerLine = 26;
+  const maxLines = 3;
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -201,8 +195,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
       const start = msToAssTime(c.start_ms);
       const end = msToAssTime(c.end_ms);
 
-      // Force wrap to two lines when needed
-      const wrapped = wrapAssTwoLines(c.text, maxCharsPerLine);
+      const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
       const text = escAssText(wrapped);
 
       return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
@@ -288,7 +281,6 @@ app.post("/render", async (req, res) => {
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // Build ASS file
     const assPath = path.join(workDir, "captions.ass");
     fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h), "utf8");
     const assForFfmpeg = escFilterPath(assPath);
@@ -304,8 +296,6 @@ app.post("/render", async (req, res) => {
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      // Burn in subtitles via libass
-      // original_size forces correct layout for margins/wrapping
       `[slideshow]subtitles='${assForFfmpeg}':original_size=${w}x${h}[subbed]`,
 
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
