@@ -109,72 +109,26 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-// -------------------- ASS (libass) subtitles --------------------
-function msToAssTime(ms) {
-  const cs = Math.max(0, Math.round(Number(ms) / 10)); // centiseconds
-  const s = Math.floor(cs / 100);
-  const cc = cs % 100;
-  const m = Math.floor(s / 60);
-  const ss = s % 60;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
-  const pad2 = (n) => String(n).padStart(2, "0");
-  return `${h}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
-}
+// IMPORTANT FIX:
+// - Do NOT alter caption text content (no wrapping, no whitespace normalization).
+// - But we must escape for FFmpeg drawtext parsing.
+// - And we must encode real newlines as "\\n" (double backslash) so FFmpeg renders a line break
+//   instead of eating "\" and leaving "n" in the text.
+function escDrawtext(t) {
+  let s = String(t || "");
 
-function escAssText(t) {
-  // Keep text "natural"; escape only ASS control chars and normalize true newlines.
-  // (No \n hacks; libass wraps automatically.)
-  return String(t ?? "")
-    .replace(/\r\n/g, " ")
-    .replace(/\n/g, " ")
-    .replace(/{/g, "\\{")
-    .replace(/}/g, "\\}");
-}
+  // If input contains literal "\n" or "\r\n" sequences, interpret them as actual newlines.
+  // This preserves intent without changing words/spaces.
+  s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
 
-function buildAss(captions, w, h) {
-  // Match your current sizing: fontSizeBase=40, then *1.5 => 60
-  const fontSizeBase = 40;
-  const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 60
-
-  const marginLR = Math.round(w * 0.10); // 10% left/right margins
-  const marginV = Math.round(h * 0.16); // position near your "red zone" (~84% height)
-
-  const header = `[Script Info]
-ScriptType: v4.00+
-PlayResX: ${w}
-PlayResY: ${h}
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,${marginLR},${marginLR},${marginV},1
-
-[Events]
-Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-`;
-
-  const events = (captions || [])
-    .map((c) => {
-      const start = msToAssTime(c.start_ms);
-      const end = msToAssTime(c.end_ms);
-      const text = escAssText(c.text);
-      return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
-    })
-    .join("\n");
-
-  return header + events + "\n";
-}
-
-function escFilterPath(p) {
-  // Escape for FFmpeg filter args inside -filter_complex
-  return String(p)
+  return s
     .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'");
+    .replace(/'/g, "\\'")
+    .replace(/%/g, "\\%")
+    // FFmpeg drawtext newline requires \\n (double backslash) inside filter string
+    .replace(/\n/g, "\\\\n");
 }
-// ---------------------------------------------------------------
 
 app.post("/render", async (req, res) => {
   const {
@@ -243,10 +197,38 @@ app.post("/render", async (req, res) => {
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // Build ASS file for libass subtitles
-    const assPath = path.join(workDir, "captions.ass");
-    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h), "utf8");
-    const assForFfmpeg = escFilterPath(assPath);
+    // === CAPTION VISUALS (FONT SIZE BASE = 35px) ===
+    const fontSizeBase = 35; // <-- CHANGED: fixed base size
+    const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // +50%
+    const lineSpacing = Math.max(2, Math.round(fontSize * 0.25));
+    const borderW = 2;
+
+    // Center around 84% height: y = (h*0.84) - (text_h/2)
+    const yExpr = `(h*0.84)-(text_h/2)`;
+    const xExpr = `(w-text_w)/2`;
+    // ==============================================
+
+    const drawtexts = scaledCaptions.map((c) => {
+      const start = (Number(c.start_ms) / 1000).toFixed(3);
+      const end = (Number(c.end_ms) / 1000).toFixed(3);
+
+      // IMPORTANT: Use caption text exactly as provided (no wrapping/normalizing).
+      const safeText = escDrawtext(c.text);
+
+      return (
+        `drawtext=` +
+        `font=DejaVuSans:` +
+        `text='${safeText}':` +
+        `fontsize=${fontSize}:` +
+        `fontcolor=white:` +
+        `borderw=${borderW}:` +
+        `bordercolor=black@1:` +
+        `line_spacing=${lineSpacing}:` +
+        `x=${xExpr}:` +
+        `y=${yExpr}:` +
+        `enable='between(t,${start},${end})'`
+      );
+    });
 
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -257,14 +239,19 @@ app.post("/render", async (req, res) => {
       `[v0]trim=duration=${seg1 / 1000},setpts=PTS-STARTPTS[s0]`,
       `[v1]trim=duration=${seg2 / 1000},setpts=PTS-STARTPTS[s1]`,
       `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
-      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
+      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`
+    ];
 
-      // Burn in subtitles via libass (wrap + margins handled by ASS style)
-      `[slideshow]subtitles='${assForFfmpeg}'[subbed]`,
+    if (drawtexts.length) {
+      filterParts.push(`[slideshow]${drawtexts.join(",")}[subbed]`);
+    } else {
+      filterParts.push(`[slideshow]setpts=PTS-STARTPTS[subbed]`);
+    }
 
+    filterParts.push(
       `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
-    ];
+    );
 
     const filter = filterParts.join(";");
 
