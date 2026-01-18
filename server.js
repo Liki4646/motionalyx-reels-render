@@ -26,6 +26,66 @@ function ensureArray(val, name) {
   if (!Array.isArray(val)) throw new Error(`${name} must be an array`);
 }
 
+function assEscape(t) {
+  // Keep captions “natural” (no forced newlines), just escape ASS control chars.
+  // Also remove real line breaks to avoid any \n/\N weirdness.
+  return String(t || "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\\/g, "\\\\")
+    .replace(/{/g, "\\{")
+    .replace(/}/g, "\\}");
+}
+
+function wrapByChars(text, maxCharsPerLine, maxLines) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+
+  const words = t.split(" ");
+  const lines = [];
+  let cur = "";
+
+  for (const w of words) {
+    const cand = cur ? `${cur} ${w}` : w;
+
+    if (cand.length <= maxCharsPerLine) {
+      cur = cand;
+      continue;
+    }
+
+    if (cur) lines.push(cur);
+    cur = w;
+
+    if (lines.length >= maxLines - 1) break;
+  }
+
+  // Push the last line
+  if (cur && lines.length < maxLines) {
+    // If we broke early because we hit maxLines, append the rest to the last line
+    const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
+    const remaining = words.slice(usedWords).join(" ").trim();
+    if (remaining) {
+      // Try to fit remaining into existing last line by wrapping again
+      let last = cur;
+      const restWords = remaining.split(" ");
+      for (const w of restWords) {
+        const cand = `${last} ${w}`;
+        if (cand.length <= maxCharsPerLine) last = cand;
+        else break;
+      }
+      cur = last;
+    }
+    lines.push(cur);
+  }
+
+  // If still somehow empty, fallback
+  if (!lines.length) return t;
+
+  // ASS newline is \N
+  return lines.join("\\N");
+}
+
 function normalizeAndScaleCaptions(captions, audioMs) {
   if (!Array.isArray(captions)) return [];
 
@@ -33,7 +93,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   for (const c of captions) {
     const start = Number(c?.start_ms);
     const end = Number(c?.end_ms);
-    const txt = String(c?.text || "").replace(/\s+/g, " ").trim();
+    const txt = String(c?.text || "").trim();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
     items.push({ dur_ms: end - start, text: txt });
   }
@@ -109,134 +169,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-function assTime(ms) {
-  const t = Math.max(0, Math.round(Number(ms) || 0));
-  const cs = Math.floor((t % 1000) / 10);
-  const totalS = Math.floor(t / 1000);
-  const s = totalS % 60;
-  const m = Math.floor(totalS / 60) % 60;
-  const h = Math.floor(totalS / 3600);
-  const pad2 = (n) => String(n).padStart(2, "0");
-  return `${h}:${pad2(m)}:${pad2(s)}.${pad2(cs)}`;
-}
-
-function escAssText(t) {
-  return String(t || "")
-    .replace(/\r\n/g, " ")
-    .replace(/\r/g, " ")
-    .replace(/\n/g, " ")
-    .replace(/{/g, "\\{")
-    .replace(/}/g, "\\}");
-}
-
-function wrapToLines(text, maxCharsPerLine, maxLines) {
-  const t = String(text || "").replace(/\s+/g, " ").trim();
-  if (!t) return [];
-  const words = t.split(" ");
-  const lines = [];
-  let line = "";
-
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i];
-    const cand = line ? `${line} ${w}` : w;
-
-    if (cand.length <= maxCharsPerLine) {
-      line = cand;
-      continue;
-    }
-
-    if (line) {
-      lines.push(line);
-      line = w;
-    } else {
-      // single word longer than max: hard cut
-      lines.push(w.slice(0, maxCharsPerLine));
-      line = w.slice(maxCharsPerLine);
-    }
-
-    if (maxLines && lines.length >= maxLines) {
-      // no shortening requested; just keep the remaining words on the last line(s)
-      // We will keep appending to the last line even if it exceeds maxCharsPerLine
-      // to avoid ellipsis and preserve full text.
-      const rest = words.slice(i + 1).join(" ");
-      if (rest) {
-        lines[lines.length - 1] = `${lines[lines.length - 1]} ${line} ${rest}`.replace(/\s+/g, " ").trim();
-        line = "";
-      }
-      break;
-    }
-  }
-
-  if (line) lines.push(line);
-  return lines;
-}
-
-function buildAss({ w, h, captions }) {
-  // Default captions (bottom dock)
-  const marginLR = Math.round(w * 0.10); // 10% left/right margins
-  const marginV = Math.round(h * 0.16); // bottom captions placement (from bottom)
-
-  // Title (Segment 1) big + bold
-  const titleFontSize = 100;
-  const titleOutline = 5;
-
-  // CHANGE #1: vertical placement for Title using MarginV (no \pos)
-  const titleMarginV = Math.round(h * 0.34);
-
-  // Default captions wrapping
-  const maxCharsPerLine = 26;
-  const maxLines = 3;
-
-  // Title wrapping (tighter to avoid clipping at large font)
-  const titleMaxCharsPerLine = 18;
-  const titleMaxLines = 3;
-
-  const outline = 3;
-
-  const header = `[Script Info]
-ScriptType: v4.00+
-PlayResX: ${w}
-PlayResY: ${h}
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
-Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
-
-[Events]
-Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-`;
-
-  const lines = [];
-  for (let i = 0; i < captions.length; i++) {
-    const c = captions[i];
-    const start = assTime(c.start_ms);
-    const end = assTime(c.end_ms);
-
-    const raw = escAssText(c.text);
-
-    if (i === 0) {
-      const titleLines = wrapToLines(raw, titleMaxCharsPerLine, titleMaxLines);
-      const titleText = titleLines.join("\\N");
-      // CHANGE #2: no \pos override for Title (use alignment + margins only)
-      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${titleText}`);
-    } else {
-      const bodyLines = wrapToLines(raw, maxCharsPerLine, maxLines);
-      const bodyText = bodyLines.join("\\N");
-      lines.push(`Dialogue: 1,${start},${end},Default,,0,0,0,,${bodyText}`);
-    }
-  }
-
-  return header + lines.join("\n") + "\n";
-}
-
-function escFilterPath(p) {
-  // for ffmpeg filter strings in single quotes
-  return String(p).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-}
-
 app.post("/render", async (req, res) => {
   const {
     audio_url,
@@ -299,28 +231,96 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // === CHANGE: image timing based on segment 1 duration ===
-    // Image 1 lasts exactly as long as caption segment 1.
-    // Images 2 and 3 split the remaining duration equally.
-    let seg1 = 0;
-    if (scaledCaptions.length >= 1 && Number.isFinite(Number(scaledCaptions[0].end_ms))) {
-      seg1 = Math.max(0, Math.round(Number(scaledCaptions[0].end_ms)));
-    } else {
-      seg1 = Math.floor(effectiveAudioMs / 3);
-    }
-    seg1 = Math.min(seg1, effectiveAudioMs);
+    // === SLIDES TIMING (as you requested earlier): image 1 lasts exactly segment 1 ===
+    const seg1Ms = scaledCaptions.length ? Math.max(1, Math.round(Number(scaledCaptions[0].end_ms))) : Math.floor(effectiveAudioMs / 3);
+    const remaining = Math.max(0, effectiveAudioMs - seg1Ms);
+    const seg2Ms = Math.floor(remaining / 2);
+    const seg3Ms = Math.max(0, remaining - seg2Ms);
 
-    const remaining = Math.max(0, effectiveAudioMs - seg1);
-    const seg2 = Math.floor(remaining / 2);
-    const seg3 = Math.max(0, remaining - seg2);
-    // ================================================
-
-    const ass = buildAss({ w, h, captions: scaledCaptions });
-    fs.writeFileSync(assPath, ass, "utf8");
+    const seg1 = seg1Ms;
+    const seg2 = seg2Ms;
+    const seg3 = seg3Ms;
+    // ============================================================================
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    const subsFilter = `subtitles='${escFilterPath(assPath)}'`;
+    // =========================
+    // SUBTITLE STYLES (ASS)
+    // Change requested:
+    // - Segment 1 font size +50%
+    // - All other segments: same size + boldness as old Segment 1
+    // - Keep margins (10% L/R), avoid overflow by wrapping with more lines
+    // =========================
+
+    // Segment 1 (Title)
+    const titleFontSize = 150; // was 100, now +50%
+    const titleOutline = 5;
+
+    // Other segments (Caption): match old Segment 1 look (100 + bold)
+    const captionFontSize = 100; // match old title size
+    const captionOutline = 5;
+
+    const marginLR = Math.round(w * 0.10); // 10% left/right
+    const marginV = Math.round(h * 0.16); // bottom captions placement (same behavior as before)
+
+    // Title vertical placement (top-center aligned, margin from top)
+    const titleMarginV = Math.round(h * 0.34);
+
+    // Wrapping limits to avoid going past left/right edges
+    // (bigger fonts => fewer chars per line, allow more lines)
+    const titleMaxCharsPerLine = 16;
+    const titleMaxLines = 4;
+
+    const capMaxCharsPerLine = 22;
+    const capMaxLines = 4;
+
+    const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${w}
+PlayResY: ${h}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,2,${marginLR},${marginLR},${marginV},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+    function msToAssTime(ms) {
+      const t = Math.max(0, Number(ms) || 0);
+      const cs = Math.floor(t / 10); // centiseconds
+      const hh = Math.floor(cs / 360000);
+      const mm = Math.floor((cs % 360000) / 6000);
+      const ss = Math.floor((cs % 6000) / 100);
+      const cc = cs % 100;
+      const pad2 = (n) => String(n).padStart(2, "0");
+      return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
+    }
+
+    let ass = header;
+
+    for (let i = 0; i < scaledCaptions.length; i++) {
+      const c = scaledCaptions[i];
+      const start = msToAssTime(c.start_ms);
+      const end = msToAssTime(c.end_ms);
+
+      if (i === 0) {
+        const raw = assEscape(c.text);
+        const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
+        // No \pos overrides; style alignment + margins handle placement
+        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${wrapped}\n`;
+      } else {
+        const raw = assEscape(c.text);
+        const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
+      }
+    }
+
+    fs.writeFileSync(assPath, ass, "utf8");
 
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -333,7 +333,8 @@ app.post("/render", async (req, res) => {
       `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      `[slideshow]${subsFilter}[subbed]`,
+      // Burn-in ASS subtitles
+      `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
       `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
@@ -343,41 +344,50 @@ app.post("/render", async (req, res) => {
 
     const args = [
       "-y",
+
       "-loop",
       "1",
       "-t",
       (seg1 / 1000).toFixed(3),
       "-i",
       img1Path,
+
       "-loop",
       "1",
       "-t",
       (seg2 / 1000).toFixed(3),
       "-i",
       img2Path,
+
       "-loop",
       "1",
       "-t",
       (seg3 / 1000).toFixed(3),
       "-i",
       img3Path,
+
       "-loop",
       "1",
       "-t",
       (Number(end_card_duration_ms) / 1000).toFixed(3),
       "-i",
       endPath,
+
       "-i",
       audioPath,
+
       "-filter_complex",
       filter,
+
       "-map",
       "[vout]",
       "-map",
       "4:a",
+
       "-r",
       String(fps),
       "-shortest",
+
       "-c:v",
       "libx264",
       "-pix_fmt",
@@ -386,10 +396,12 @@ app.post("/render", async (req, res) => {
       "high",
       "-level",
       "4.1",
+
       "-c:a",
       "aac",
       "-b:a",
       "192k",
+
       outPath
     ];
 
