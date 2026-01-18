@@ -174,6 +174,8 @@ function buildAss(captions, w, h) {
   const marginLR = Math.round(w * 0.10); // 10% left/right margins
   const marginV = Math.round(h * 0.16); // bottom captions placement
 
+  const titleMarginV = Math.round(h * 0.34); // CHANGE #1: vertical placement for Title using MarginV (no \pos)
+
   const maxCharsPerLine = 26;
   const maxLines = 3;
 
@@ -182,10 +184,6 @@ function buildAss(captions, w, h) {
   const titleMaxLines = 2;
 
   const outline = 3;
-
-  // Place title around upper-middle (slightly above true center)
-  const titlePosX = Math.round(w * 0.5);
-  const titlePosY = Math.round(h * 0.44);
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -197,7 +195,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
-Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,5,${marginLR},${marginLR},0,1
+Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -213,9 +211,8 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     if (i === 0) {
       const wrappedTitle = wrapAssToMaxLines(c.text, titleMaxCharsPerLine, titleMaxLines);
       const text = escAssText(wrappedTitle);
-      // \pos for precise center placement, alignment=5 (center)
-      const override = `{\\pos(${titlePosX},${titlePosY})}`;
-      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${override}${text}`);
+      // CHANGE #2: remove \pos override so margins apply and wrapping respects 10% LR
+      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${text}`);
     } else {
       const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
       const text = escAssText(wrapped);
