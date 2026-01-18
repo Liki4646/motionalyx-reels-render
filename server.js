@@ -168,8 +168,8 @@ function buildAss(captions, w, h) {
   const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 72
 
   // Title (Segment 1) big + bold in the middle
-  const titleFontSize = 96;
-  const titleOutline = 4;
+  const titleFontSize = 100;
+  const titleOutline = 5;
 
   const marginLR = Math.round(w * 0.10); // 10% left/right margins
   const marginV = Math.round(h * 0.16); // bottom captions placement
@@ -179,9 +179,9 @@ function buildAss(captions, w, h) {
   const maxCharsPerLine = 26;
   const maxLines = 3;
 
-  // Title wraps a bit wider and up to 2 lines (clean headline feel)
-  const titleMaxCharsPerLine = 28;
-  const titleMaxLines = 2;
+  // Title wraps a bit wider and up to 3 lines (clean headline feel)
+  const titleMaxCharsPerLine = 18;
+  const titleMaxLines = 3;
 
   const outline = 3;
 
