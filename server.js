@@ -33,7 +33,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   for (const c of captions) {
     const start = Number(c?.start_ms);
     const end = Number(c?.end_ms);
-    const txt = String(c?.text || "").trim();
+    const txt = String(c?.text || "").replace(/\s+/g, " ").trim();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
     items.push({ dur_ms: end - start, text: txt });
   }
@@ -109,77 +109,85 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-// -------------------- ASS (libass) subtitles --------------------
-function msToAssTime(ms) {
-  const cs = Math.max(0, Math.round(Number(ms) / 10)); // centiseconds
-  const s = Math.floor(cs / 100);
-  const cc = cs % 100;
-  const m = Math.floor(s / 60);
-  const ss = s % 60;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
+function assTime(ms) {
+  const t = Math.max(0, Math.round(Number(ms) || 0));
+  const cs = Math.floor((t % 1000) / 10);
+  const totalS = Math.floor(t / 1000);
+  const s = totalS % 60;
+  const m = Math.floor(totalS / 60) % 60;
+  const h = Math.floor(totalS / 3600);
   const pad2 = (n) => String(n).padStart(2, "0");
-  return `${h}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
-}
-
-function wrapAssToMaxLines(text, maxCharsPerLine = 26, maxLines = 3) {
-  const t = String(text ?? "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-
-  const words = t.split(" ");
-  const lines = [];
-  let current = "";
-
-  for (const w of words) {
-    const cand = current ? `${current} ${w}` : w;
-    if (cand.length <= maxCharsPerLine) {
-      current = cand;
-    } else {
-      if (current) lines.push(current);
-      current = w;
-    }
-  }
-  if (current) lines.push(current);
-
-  // Allow up to maxLines WITHOUT truncation.
-  if (lines.length <= maxLines) {
-    return lines.join("\\N");
-  }
-
-  // If somehow more than maxLines, just keep splitting into maxLines by packing the remainder into last line (no ellipsis).
-  const out = lines.slice(0, maxLines - 1);
-  const rest = lines.slice(maxLines - 1).join(" ");
-  out.push(rest);
-
-  return out.join("\\N");
+  return `${h}:${pad2(m)}:${pad2(s)}.${pad2(cs)}`;
 }
 
 function escAssText(t) {
-  return String(t ?? "")
+  return String(t || "")
     .replace(/\r\n/g, " ")
+    .replace(/\r/g, " ")
     .replace(/\n/g, " ")
     .replace(/{/g, "\\{")
     .replace(/}/g, "\\}");
 }
 
-function buildAss(captions, w, h) {
-  // Bottom captions (keep as you have them)
-  const fontSizeBase = 48; // (was 40, increased earlier)
-  const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 72
+function wrapToLines(text, maxCharsPerLine, maxLines) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return [];
+  const words = t.split(" ");
+  const lines = [];
+  let line = "";
 
-  // Title (Segment 1) big + bold in the middle
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const cand = line ? `${line} ${w}` : w;
+
+    if (cand.length <= maxCharsPerLine) {
+      line = cand;
+      continue;
+    }
+
+    if (line) {
+      lines.push(line);
+      line = w;
+    } else {
+      // single word longer than max: hard cut
+      lines.push(w.slice(0, maxCharsPerLine));
+      line = w.slice(maxCharsPerLine);
+    }
+
+    if (maxLines && lines.length >= maxLines) {
+      // no shortening requested; just keep the remaining words on the last line(s)
+      // We will keep appending to the last line even if it exceeds maxCharsPerLine
+      // to avoid ellipsis and preserve full text.
+      const rest = words.slice(i + 1).join(" ");
+      if (rest) {
+        lines[lines.length - 1] = `${lines[lines.length - 1]} ${line} ${rest}`.replace(/\s+/g, " ").trim();
+        line = "";
+      }
+      break;
+    }
+  }
+
+  if (line) lines.push(line);
+  return lines;
+}
+
+function buildAss({ w, h, captions }) {
+  // Default captions (bottom dock)
+  const marginLR = Math.round(w * 0.10); // 10% left/right margins
+  const marginV = Math.round(h * 0.16); // bottom captions placement (from bottom)
+
+  // Title (Segment 1) big + bold
   const titleFontSize = 100;
   const titleOutline = 5;
 
-  const marginLR = Math.round(w * 0.10); // 10% left/right margins
-  const marginV = Math.round(h * 0.16); // bottom captions placement
+  // CHANGE #1: vertical placement for Title using MarginV (no \pos)
+  const titleMarginV = Math.round(h * 0.34);
 
-  const titleMarginV = Math.round(h * 0.34); // CHANGE #1: vertical placement for Title using MarginV (no \pos)
-
+  // Default captions wrapping
   const maxCharsPerLine = 26;
   const maxLines = 3;
 
-  // Title wraps a bit wider and up to 3 lines (clean headline feel)
+  // Title wrapping (tighter to avoid clipping at large font)
   const titleMaxCharsPerLine = 18;
   const titleMaxLines = 3;
 
@@ -194,7 +202,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
+Style: Default,DejaVu Sans,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
 Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
 
 [Events]
@@ -202,21 +210,22 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 `;
 
   const lines = [];
-
-  for (let i = 0; i < (captions || []).length; i++) {
+  for (let i = 0; i < captions.length; i++) {
     const c = captions[i];
-    const start = msToAssTime(c.start_ms);
-    const end = msToAssTime(c.end_ms);
+    const start = assTime(c.start_ms);
+    const end = assTime(c.end_ms);
+
+    const raw = escAssText(c.text);
 
     if (i === 0) {
-      const wrappedTitle = wrapAssToMaxLines(c.text, titleMaxCharsPerLine, titleMaxLines);
-      const text = escAssText(wrappedTitle);
-      // CHANGE #2: remove \pos override so margins apply and wrapping respects 10% LR
-      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${text}`);
+      const titleLines = wrapToLines(raw, titleMaxCharsPerLine, titleMaxLines);
+      const titleText = titleLines.join("\\N");
+      // CHANGE #2: no \pos override for Title (use alignment + margins only)
+      lines.push(`Dialogue: 1,${start},${end},Title,,0,0,0,,${titleText}`);
     } else {
-      const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
-      const text = escAssText(wrapped);
-      lines.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`);
+      const bodyLines = wrapToLines(raw, maxCharsPerLine, maxLines);
+      const bodyText = bodyLines.join("\\N");
+      lines.push(`Dialogue: 1,${start},${end},Default,,0,0,0,,${bodyText}`);
     }
   }
 
@@ -224,12 +233,9 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 }
 
 function escFilterPath(p) {
-  return String(p)
-    .replace(/\\/g, "\\\\")
-    .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'");
+  // for ffmpeg filter strings in single quotes
+  return String(p).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
-// ---------------------------------------------------------------
 
 app.post("/render", async (req, res) => {
   const {
@@ -255,6 +261,7 @@ app.post("/render", async (req, res) => {
     const img2Path = path.join(workDir, "img2.png");
     const img3Path = path.join(workDir, "img3.png");
     const endPath = path.join(workDir, "end.png");
+    const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
     await downloadToFile(audio_url, audioPath);
@@ -292,15 +299,28 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    const seg1 = Math.floor(effectiveAudioMs / 3);
-    const seg2 = Math.floor(effectiveAudioMs / 3);
-    const seg3 = Math.max(0, effectiveAudioMs - seg1 - seg2);
+    // === CHANGE: image timing based on segment 1 duration ===
+    // Image 1 lasts exactly as long as caption segment 1.
+    // Images 2 and 3 split the remaining duration equally.
+    let seg1 = 0;
+    if (scaledCaptions.length >= 1 && Number.isFinite(Number(scaledCaptions[0].end_ms))) {
+      seg1 = Math.max(0, Math.round(Number(scaledCaptions[0].end_ms)));
+    } else {
+      seg1 = Math.floor(effectiveAudioMs / 3);
+    }
+    seg1 = Math.min(seg1, effectiveAudioMs);
+
+    const remaining = Math.max(0, effectiveAudioMs - seg1);
+    const seg2 = Math.floor(remaining / 2);
+    const seg3 = Math.max(0, remaining - seg2);
+    // ================================================
+
+    const ass = buildAss({ w, h, captions: scaledCaptions });
+    fs.writeFileSync(assPath, ass, "utf8");
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    const assPath = path.join(workDir, "captions.ass");
-    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h), "utf8");
-    const assForFfmpeg = escFilterPath(assPath);
+    const subsFilter = `subtitles='${escFilterPath(assPath)}'`;
 
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -308,14 +328,14 @@ app.post("/render", async (req, res) => {
       `[2:v]${coverCrop}[v2]`,
       `[3:v]${coverCrop}[v3]`,
 
-      `[v0]trim=duration=${seg1 / 1000},setpts=PTS-STARTPTS[s0]`,
-      `[v1]trim=duration=${seg2 / 1000},setpts=PTS-STARTPTS[s1]`,
-      `[v2]trim=duration=${seg3 / 1000},setpts=PTS-STARTPTS[s2]`,
+      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
+      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
+      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      `[slideshow]subtitles='${assForFfmpeg}':original_size=${w}x${h}[subbed]`,
+      `[slideshow]${subsFilter}[subbed]`,
 
-      `[v3]trim=duration=${Number(end_card_duration_ms) / 1000},setpts=PTS-STARTPTS[endcard]`,
+      `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
