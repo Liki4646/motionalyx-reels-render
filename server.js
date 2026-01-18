@@ -258,7 +258,7 @@ app.post("/render", async (req, res) => {
 
     // Other segments (Caption): match old Segment 1 look (100 + bold)
     const captionFontSize = 100; // match old title size
-    const captionOutline = 5;
+    const captionOutline = 3;
 
     const marginLR = Math.round(w * 0.10); // 10% left/right
     const marginV = Math.round(h * 0.16); // bottom captions placement (same behavior as before)
@@ -268,10 +268,10 @@ app.post("/render", async (req, res) => {
 
     // Wrapping limits to avoid going past left/right edges
     // (bigger fonts => fewer chars per line, allow more lines)
-    const titleMaxCharsPerLine = 16;
+    const titleMaxCharsPerLine = 12;
     const titleMaxLines = 4;
 
-    const capMaxCharsPerLine = 22;
+    const capMaxCharsPerLine = 18;
     const capMaxLines = 4;
 
     const header = `[Script Info]
