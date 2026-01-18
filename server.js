@@ -160,20 +160,23 @@ function escAssText(t) {
     .replace(/}/g, "\\}");
 }
 
-function buildAss(captions, w, h) {
-  // CHANGED: slightly larger base to improve readability (+~20-30%)
-  // 48 * 1.5 => 72
+function buildAss(captions, w, h, hookText) {
+  // captions (bottom): 48 * 1.5 => 72
   const fontSizeBase = 48;
   const fontSize = Math.max(14, Math.round(fontSizeBase * 1.5)); // 72
 
+  // hook (top): smaller + subtle
+  const hookFontSize = 56;
+
   const marginLR = Math.round(w * 0.10); // 10% left/right margins
-  const marginV = Math.round(h * 0.16); // position near your red zone (~84% height)
+  const marginV = Math.round(h * 0.16); // bottom captions placement
+  const hookMarginV = Math.round(h * 0.08); // top placement
 
   const maxCharsPerLine = 26;
   const maxLines = 3;
 
-  // CHANGED: outline slightly thicker for readability on light backgrounds
-  const outline = 3;
+  const outline = 3; // captions outline
+  const hookOutline = 2; // hook outline (a bit lighter)
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -185,24 +188,33 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Default,DejaVu Sans,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${outline},0,2,${marginLR},${marginLR},${marginV},1
+Style: Hook,DejaVu Sans,${hookFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,${hookOutline},0,8,${marginLR},${marginLR},${hookMarginV},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 `;
 
-  const events = (captions || [])
-    .map((c) => {
-      const start = msToAssTime(c.start_ms);
-      const end = msToAssTime(c.end_ms);
+  const lines = [];
 
-      const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
-      const text = escAssText(wrapped);
+  // Hook shows for first 2.00s only
+  const ht = String(hookText || "").trim();
+  if (ht) {
+    const hookSafe = escAssText(ht);
+    lines.push(`Dialogue: 1,0:00:00.00,0:00:02.00,Hook,,0,0,0,,${hookSafe}`);
+  }
 
-      return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
-    })
-    .join("\n");
+  // Captions
+  for (const c of captions || []) {
+    const start = msToAssTime(c.start_ms);
+    const end = msToAssTime(c.end_ms);
 
-  return header + events + "\n";
+    const wrapped = wrapAssToMaxLines(c.text, maxCharsPerLine, maxLines);
+    const text = escAssText(wrapped);
+
+    lines.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`);
+  }
+
+  return header + lines.join("\n") + "\n";
 }
 
 function escFilterPath(p) {
@@ -218,6 +230,7 @@ app.post("/render", async (req, res) => {
     audio_url,
     images,
     captions,
+    hook_text, // <-- NEW
     end_card_url,
     end_card_duration_ms = 4000,
     video = { width: 1080, height: 1920, fps: 30 }
@@ -281,7 +294,7 @@ app.post("/render", async (req, res) => {
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const assPath = path.join(workDir, "captions.ass");
-    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h), "utf8");
+    fs.writeFileSync(assPath, buildAss(scaledCaptions, w, h, hook_text), "utf8");
     const assForFfmpeg = escFilterPath(assPath);
 
     const filterParts = [
