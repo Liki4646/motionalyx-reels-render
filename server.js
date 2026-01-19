@@ -269,10 +269,10 @@ app.post("/render", async (req, res) => {
     // Wrapping limits to avoid going past left/right edges
     // (bigger fonts => fewer chars per line, allow more lines)
     const titleMaxCharsPerLine = 12;
-    const titleMaxLines = 4;
+    const titleMaxLines = 6;
 
     const capMaxCharsPerLine = 18;
-    const capMaxLines = 4;
+    const capMaxLines = 5;
 
     const header = `[Script Info]
 ScriptType: v4.00+
