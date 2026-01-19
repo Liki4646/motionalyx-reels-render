@@ -66,7 +66,6 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
-      // Try to fit remaining into existing last line by wrapping again
       let last = cur;
       const restWords = remaining.split(" ");
       for (const w of restWords) {
@@ -79,7 +78,6 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     lines.push(cur);
   }
 
-  // If still somehow empty, fallback
   if (!lines.length) return t;
 
   // ASS newline is \N
@@ -197,7 +195,6 @@ app.post("/render", async (req, res) => {
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
-    // Optional end-card audio (slogan)
     const sloganPath = path.join(workDir, "end_card_audio.mp3");
     const hasEndCardAudio = Boolean(end_card_audio_url && String(end_card_audio_url).trim());
 
@@ -240,7 +237,7 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // === SLIDES TIMING (as you requested earlier): image 1 lasts exactly segment 1 ===
+    // === SLIDES TIMING: image 1 lasts exactly segment 1 ===
     const seg1Ms = scaledCaptions.length ? Math.max(1, Math.round(Number(scaledCaptions[0].end_ms))) : Math.floor(effectiveAudioMs / 3);
     const remaining = Math.max(0, effectiveAudioMs - seg1Ms);
     const seg2Ms = Math.floor(remaining / 2);
@@ -249,29 +246,28 @@ app.post("/render", async (req, res) => {
     const seg1 = seg1Ms;
     const seg2 = seg2Ms;
     const seg3 = seg3Ms;
-    // ============================================================================
+
+    // IMPORTANT: end card starts after the actual slideshow duration (not ffprobe duration)
+    const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3));
+    const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
+    const totalMs = slideshowMs + endCardDurMs;
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     // =========================
     // SUBTITLE STYLES (ASS)
     // =========================
-
-    // Segment 1 (Title)
-    const titleFontSize = 150; // was 100, now +50%
+    const titleFontSize = 150;
     const titleOutline = 5;
 
-    // Other segments (Caption): match old Segment 1 look (100 + bold)
-    const captionFontSize = 100; // match old title size
+    const captionFontSize = 100;
     const captionOutline = 3;
 
-    const marginLR = Math.round(w * 0.10); // 10% left/right
-    const marginV = Math.round(h * 0.16); // bottom captions placement (same behavior as before)
+    const marginLR = Math.round(w * 0.10);
+    const marginV = Math.round(h * 0.16);
 
-    // Title vertical placement (top-center aligned, margin from top)
     const titleMarginV = Math.round(h * 0.34);
 
-    // Wrapping limits to avoid going past left/right edges
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
 
@@ -296,7 +292,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     function msToAssTime(ms) {
       const t = Math.max(0, Number(ms) || 0);
-      const cs = Math.floor(t / 10); // centiseconds
+      const cs = Math.floor(t / 10);
       const hh = Math.floor(cs / 360000);
       const mm = Math.floor((cs % 360000) / 6000);
       const ss = Math.floor((cs % 6000) / 100);
@@ -326,7 +322,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // -------------------------
-    // Build filter_complex (video + audio)
+    // Build filter_complex
     // -------------------------
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -341,44 +337,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
+      `[v3]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
     // -------------------------
-    // End-card audio overlay (FIXED)
+    // AUDIO: keep original VO only during slideshow,
+    // then silence during end card, then overlay slogan at +0.2s.
     // -------------------------
-    const endCardStartSec = Number(effectiveAudioMs) / 1000;
-    const endCardDurSec = Number(end_card_duration_ms) / 1000;
-    const totalDurSec = endCardStartSec + endCardDurSec;
+    const endCardStartSec = slideshowMs / 1000;
+    const totalDurSec = totalMs / 1000;
 
-    const sloganStartSec = endCardStartSec + 0.15;
+    const sloganStartSec = endCardStartSec + 0.2;
     const sloganDelayMs = Math.max(0, Math.round(sloganStartSec * 1000));
 
-    const duckStart = endCardStartSec + 0.10;
-    const duckEnd = endCardStartSec + 1.80;
-
-    const duckGain = 0.32; // ~ -10 dB
-    const fadeIn = 0.12;
-    const fadeOut = 0.15;
-    const fadeOutStart = 1.35;
-
-    // Pad main audio with silence so it continues through the end card, then trim to exact total duration.
+    // 1) Trim main audio to slideshow duration only
+    // 2) Pad with silence to reach full video length
     filterParts.push(
-      `[4:a]asetpts=PTS-STARTPTS,` +
-        `apad=pad_dur=${(endCardDurSec + 2).toFixed(3)},` +
-        `atrim=0:${totalDurSec.toFixed(3)},` +
-        `volume='if(between(t,${duckStart.toFixed(3)},${duckEnd.toFixed(3)}),${duckGain},1)'` +
-        `[amain]`
+      `[4:a]asetpts=PTS-STARTPTS,atrim=0:${endCardStartSec.toFixed(3)},apad=pad_dur=${(endCardDurMs / 1000 + 2).toFixed(3)},atrim=0:${totalDurSec.toFixed(3)}[amain]`
     );
 
     if (hasEndCardAudio) {
+      // Make slogan a bit louder and smooth (fade in/out)
+      const fadeIn = 0.12;
+      const fadeOut = 0.15;
+      const fadeOutStart = 1.35;
+
       filterParts.push(
-        `[5:a]asetpts=PTS-STARTPTS,` +
-          `adelay=${sloganDelayMs}|${sloganDelayMs},` +
-          `afade=t=in:st=0:d=${fadeIn},` +
-          `afade=t=out:st=${fadeOutStart}:d=${fadeOut}` +
-          `[aslogan]`,
+        `[5:a]asetpts=PTS-STARTPTS,adelay=${sloganDelayMs}|${sloganDelayMs},afade=t=in:st=0:d=${fadeIn},afade=t=out:st=${fadeOutStart}:d=${fadeOut},volume=1.25[aslogan]`,
         `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
         `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
       );
@@ -415,7 +401,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-loop",
       "1",
       "-t",
-      (Number(end_card_duration_ms) / 1000).toFixed(3),
+      (endCardDurMs / 1000).toFixed(3),
       "-i",
       endPath,
 
@@ -438,7 +424,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
       "-r",
       String(fps),
-      "-shortest",
 
       "-c:v",
       "libx264",
@@ -454,6 +439,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-b:a",
       "192k",
 
+      // IMPORTANT: do NOT rely on -shortest here; we already trimmed audio to exact duration
       outPath
     );
 
