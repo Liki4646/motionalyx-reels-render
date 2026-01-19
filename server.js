@@ -17,12 +17,8 @@ app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
 async function downloadToFile(url, outPath) {
   const r = await fetch(url, {
-    // make sure redirects are followed (CDNs sometimes redirect)
     redirect: "follow",
-    headers: {
-      // Some CDNs behave better with a UA
-      "User-Agent": "Mozilla/5.0 (MotionalyxRenderBot)"
-    }
+    headers: { "User-Agent": "Mozilla/5.0 (MotionalyxRenderBot)" }
   });
   if (!r.ok) throw new Error(`Download failed ${r.status}: ${url}`);
   const buf = Buffer.from(await r.arrayBuffer());
@@ -34,8 +30,6 @@ function ensureArray(val, name) {
 }
 
 function assEscape(t) {
-  // Keep captions “natural” (no forced newlines), just escape ASS control chars.
-  // Also remove real line breaks to avoid any \n/\N weirdness.
   return String(t || "")
     .replace(/\r?\n/g, " ")
     .replace(/\s+/g, " ")
@@ -67,9 +61,7 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     if (lines.length >= maxLines - 1) break;
   }
 
-  // Push the last line
   if (cur && lines.length < maxLines) {
-    // If we broke early because we hit maxLines, append the rest to the last line
     const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
@@ -87,7 +79,6 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
 
   if (!lines.length) return t;
 
-  // ASS newline is \N
   return lines.join("\\N");
 }
 
@@ -202,9 +193,9 @@ app.post("/render", async (req, res) => {
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
-    // End card slogan audio
     const sloganMp3Path = path.join(workDir, "end_card_audio.mp3");
     const sloganWavPath = path.join(workDir, "end_card_audio.wav");
+
     const sloganUrl = (end_card_audio_url && String(end_card_audio_url).trim()) || "";
     let hasEndCardAudio = Boolean(sloganUrl);
 
@@ -218,18 +209,15 @@ app.post("/render", async (req, res) => {
     await downloadToFile(end_card_url, endPath);
 
     if (hasEndCardAudio) {
-      // Download MP3
       await downloadToFile(sloganUrl, sloganMp3Path);
 
-      const size = fs.existsSync(sloganMp3Path) ? fs.statSync(sloganMp3Path).size : 0;
-      console.log("[render] slogan mp3 bytes:", size);
+      const mp3Size = fs.existsSync(sloganMp3Path) ? fs.statSync(sloganMp3Path).size : 0;
+      console.log("[render] slogan mp3 bytes:", mp3Size);
 
-      // If CDN gave us something weird (HTML error page), it will usually be tiny.
-      if (size < 1500) {
+      if (mp3Size < 1500) {
         console.log("[render] slogan mp3 seems too small -> skipping end card audio");
         hasEndCardAudio = false;
       } else {
-        // Re-encode to WAV for maximum FFmpeg compatibility
         try {
           await execFileAsync("ffmpeg", [
             "-y",
@@ -246,8 +234,10 @@ app.post("/render", async (req, res) => {
             "pcm_s16le",
             sloganWavPath
           ]);
+
           const wavSize = fs.existsSync(sloganWavPath) ? fs.statSync(sloganWavPath).size : 0;
           console.log("[render] slogan wav bytes:", wavSize);
+
           if (wavSize < 3000) {
             console.log("[render] slogan wav too small -> skipping end card audio");
             hasEndCardAudio = false;
@@ -259,7 +249,6 @@ app.post("/render", async (req, res) => {
       }
     }
 
-    // Probe main audio duration
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
@@ -289,7 +278,6 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // === SLIDES TIMING: image 1 lasts exactly segment 1 ===
     const seg1Ms = scaledCaptions.length
       ? Math.max(1, Math.round(Number(scaledCaptions[0].end_ms)))
       : Math.floor(effectiveAudioMs / 3);
@@ -302,20 +290,12 @@ app.post("/render", async (req, res) => {
     const seg2 = seg2Ms;
     const seg3 = seg3Ms;
 
-    // Slideshow duration (what you actually render)
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3));
-
-    // End card duration
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
-
-    // Total duration
     const totalMs = slideshowMs + endCardDurMs;
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // =========================
-    // SUBTITLE STYLES (ASS)
-    // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -380,9 +360,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // -------------------------
-    // Build filter_complex
-    // -------------------------
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
@@ -400,12 +377,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
-    // -------------------------
-    // AUDIO
-    // - VO only during slideshow
-    // - silence during end card
-    // - slogan starts at end card + 0.2s
-    // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
@@ -422,17 +393,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     );
 
     if (hasEndCardAudio) {
-      // Slogan wav input will be #5:a
+      // ✅ FIX: fade/volume BEFORE delay (otherwise fade-out happens during the 19s silence and kills the slogan)
       const fadeIn = 0.12;
-      const fadeOut = 0.15;
-      const fadeOutStart = 1.35;
 
       filterParts.push(
         `[5:a]asetpts=PTS-STARTPTS,` +
-          `adelay=${sloganDelayMs}|${sloganDelayMs},` +
           `afade=t=in:st=0:d=${fadeIn},` +
-          `afade=t=out:st=${fadeOutStart}:d=${fadeOut},` +
-          `volume=1.35` +
+          `volume=1.35,` +
+          `adelay=${sloganDelayMs}|${sloganDelayMs}` +
           `[aslogan]`,
         `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
         `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
@@ -478,7 +446,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       audioPath
     ];
 
-    // IMPORTANT: if slogan is valid, feed WAV to ffmpeg as extra input
     if (hasEndCardAudio) {
       args.push("-i", sloganWavPath);
     }
