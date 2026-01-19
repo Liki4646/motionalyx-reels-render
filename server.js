@@ -176,6 +176,7 @@ app.post("/render", async (req, res) => {
     captions,
     end_card_url,
     end_card_duration_ms = 4000,
+    end_card_audio_url, // <-- NEW
     video = { width: 1080, height: 1920, fps: 30 }
   } = req.body || {};
 
@@ -196,11 +197,19 @@ app.post("/render", async (req, res) => {
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
+    // Optional end-card slogan audio
+    const sloganPath = path.join(workDir, "end_card_audio.mp3"); // <-- NEW
+    const hasEndCardAudio = Boolean(end_card_audio_url && String(end_card_audio_url).trim()); // <-- NEW
+
     await downloadToFile(audio_url, audioPath);
     await downloadToFile(images[0], img1Path);
     await downloadToFile(images[1], img2Path);
     await downloadToFile(images[2], img3Path);
     await downloadToFile(end_card_url, endPath);
+
+    if (hasEndCardAudio) {
+      await downloadToFile(String(end_card_audio_url).trim(), sloganPath);
+    }
 
     let audioMs = NaN;
     try {
@@ -322,6 +331,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
+    // -------------------------
+    // Build filter_complex
+    // -------------------------
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
@@ -339,6 +351,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
+
+    // -------------------------
+    // End-card audio overlay (NEW)
+    // -------------------------
+    // End card starts after slideshow (which equals effectiveAudioMs)
+    const endCardStartSec = (Number(effectiveAudioMs) / 1000);
+    const sloganStartSec = endCardStartSec + 0.15; // as agreed
+    const sloganDelayMs = Math.max(0, Math.round(sloganStartSec * 1000));
+
+    // Duck window (as agreed)
+    const duckStart = endCardStartSec + 0.10;
+    const duckEnd = endCardStartSec + 1.80;
+
+    // Main audio label is always input 4:a (because 4th input is audio.mp3)
+    // Slogan audio, if present, becomes input 5:a
+    if (hasEndCardAudio) {
+      const duckGain = 0.32; // ~ -10 dB
+      const fadeIn = 0.12;
+      const fadeOut = 0.15;
+      const fadeOutStart = 1.35; // relative to slogan start (safe for ~1.5s slogan)
+
+      filterParts.push(
+        `[4:a]asetpts=PTS-STARTPTS,volume='if(between(t,${duckStart.toFixed(3)},${duckEnd.toFixed(3)}),${duckGain},1)'[a0]`,
+        `[5:a]asetpts=PTS-STARTPTS,adelay=${sloganDelayMs}|${sloganDelayMs},afade=t=in:st=0:d=${fadeIn},afade=t=out:st=${fadeOutStart}:d=${fadeOut}[aS]`,
+        `[a0][aS]amix=inputs=2:normalize=0:dropout_transition=0[aout]`
+      );
+    }
 
     const filter = filterParts.join(";");
 
@@ -374,16 +413,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       endPath,
 
       "-i",
-      audioPath,
+      audioPath
+    ];
 
+    // Add slogan input (NEW)
+    if (hasEndCardAudio) {
+      args.push("-i", sloganPath);
+    }
+
+    args.push(
       "-filter_complex",
       filter,
 
       "-map",
-      "[vout]",
-      "-map",
-      "4:a",
+      "[vout]"
+    );
 
+    // Map audio
+    if (hasEndCardAudio) {
+      args.push("-map", "[aout]");
+    } else {
+      args.push("-map", "4:a");
+    }
+
+    args.push(
       "-r",
       String(fps),
       "-shortest",
@@ -403,7 +456,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "192k",
 
       outPath
-    ];
+    );
 
     await execFileAsync("ffmpeg", args);
 
