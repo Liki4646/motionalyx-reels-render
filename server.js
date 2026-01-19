@@ -176,7 +176,7 @@ app.post("/render", async (req, res) => {
     captions,
     end_card_url,
     end_card_duration_ms = 4000,
-    end_card_audio_url, // <-- NEW
+    end_card_audio_url,
     video = { width: 1080, height: 1920, fps: 30 }
   } = req.body || {};
 
@@ -197,9 +197,9 @@ app.post("/render", async (req, res) => {
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
-    // Optional end-card slogan audio
-    const sloganPath = path.join(workDir, "end_card_audio.mp3"); // <-- NEW
-    const hasEndCardAudio = Boolean(end_card_audio_url && String(end_card_audio_url).trim()); // <-- NEW
+    // Optional end-card audio (slogan)
+    const sloganPath = path.join(workDir, "end_card_audio.mp3");
+    const hasEndCardAudio = Boolean(end_card_audio_url && String(end_card_audio_url).trim());
 
     await downloadToFile(audio_url, audioPath);
     await downloadToFile(images[0], img1Path);
@@ -255,10 +255,6 @@ app.post("/render", async (req, res) => {
 
     // =========================
     // SUBTITLE STYLES (ASS)
-    // Change requested:
-    // - Segment 1 font size +50%
-    // - All other segments: same size + boldness as old Segment 1
-    // - Keep margins (10% L/R), avoid overflow by wrapping with more lines
     // =========================
 
     // Segment 1 (Title)
@@ -276,7 +272,6 @@ app.post("/render", async (req, res) => {
     const titleMarginV = Math.round(h * 0.34);
 
     // Wrapping limits to avoid going past left/right edges
-    // (bigger fonts => fewer chars per line, allow more lines)
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
 
@@ -320,7 +315,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       if (i === 0) {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
-        // No \pos overrides; style alignment + margins handle placement
         ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${wrapped}\n`;
       } else {
         const raw = assEscape(c.text);
@@ -332,7 +326,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // -------------------------
-    // Build filter_complex
+    // Build filter_complex (video + audio)
     // -------------------------
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -345,7 +339,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
       `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
 
-      // Burn-in ASS subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
       `[v3]trim=duration=${(Number(end_card_duration_ms) / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
@@ -353,30 +346,44 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     ];
 
     // -------------------------
-    // End-card audio overlay (NEW)
+    // End-card audio overlay (FIXED)
     // -------------------------
-    // End card starts after slideshow (which equals effectiveAudioMs)
-    const endCardStartSec = (Number(effectiveAudioMs) / 1000);
-    const sloganStartSec = endCardStartSec + 0.15; // as agreed
+    const endCardStartSec = Number(effectiveAudioMs) / 1000;
+    const endCardDurSec = Number(end_card_duration_ms) / 1000;
+    const totalDurSec = endCardStartSec + endCardDurSec;
+
+    const sloganStartSec = endCardStartSec + 0.15;
     const sloganDelayMs = Math.max(0, Math.round(sloganStartSec * 1000));
 
-    // Duck window (as agreed)
     const duckStart = endCardStartSec + 0.10;
     const duckEnd = endCardStartSec + 1.80;
 
-    // Main audio label is always input 4:a (because 4th input is audio.mp3)
-    // Slogan audio, if present, becomes input 5:a
-    if (hasEndCardAudio) {
-      const duckGain = 0.32; // ~ -10 dB
-      const fadeIn = 0.12;
-      const fadeOut = 0.15;
-      const fadeOutStart = 1.35; // relative to slogan start (safe for ~1.5s slogan)
+    const duckGain = 0.32; // ~ -10 dB
+    const fadeIn = 0.12;
+    const fadeOut = 0.15;
+    const fadeOutStart = 1.35;
 
+    // Pad main audio with silence so it continues through the end card, then trim to exact total duration.
+    filterParts.push(
+      `[4:a]asetpts=PTS-STARTPTS,` +
+        `apad=pad_dur=${(endCardDurSec + 2).toFixed(3)},` +
+        `atrim=0:${totalDurSec.toFixed(3)},` +
+        `volume='if(between(t,${duckStart.toFixed(3)},${duckEnd.toFixed(3)}),${duckGain},1)'` +
+        `[amain]`
+    );
+
+    if (hasEndCardAudio) {
       filterParts.push(
-        `[4:a]asetpts=PTS-STARTPTS,volume='if(between(t,${duckStart.toFixed(3)},${duckEnd.toFixed(3)}),${duckGain},1)'[a0]`,
-        `[5:a]asetpts=PTS-STARTPTS,adelay=${sloganDelayMs}|${sloganDelayMs},afade=t=in:st=0:d=${fadeIn},afade=t=out:st=${fadeOutStart}:d=${fadeOut}[aS]`,
-        `[a0][aS]amix=inputs=2:normalize=0:dropout_transition=0[aout]`
+        `[5:a]asetpts=PTS-STARTPTS,` +
+          `adelay=${sloganDelayMs}|${sloganDelayMs},` +
+          `afade=t=in:st=0:d=${fadeIn},` +
+          `afade=t=out:st=${fadeOutStart}:d=${fadeOut}` +
+          `[aslogan]`,
+        `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
+        `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
       );
+    } else {
+      filterParts.push(`[amain]atrim=0:${totalDurSec.toFixed(3)}[aout2]`);
     }
 
     const filter = filterParts.join(";");
@@ -416,7 +423,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       audioPath
     ];
 
-    // Add slogan input (NEW)
     if (hasEndCardAudio) {
       args.push("-i", sloganPath);
     }
@@ -426,17 +432,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       filter,
 
       "-map",
-      "[vout]"
-    );
+      "[vout]",
+      "-map",
+      "[aout2]",
 
-    // Map audio
-    if (hasEndCardAudio) {
-      args.push("-map", "[aout]");
-    } else {
-      args.push("-map", "4:a");
-    }
-
-    args.push(
       "-r",
       String(fps),
       "-shortest",
