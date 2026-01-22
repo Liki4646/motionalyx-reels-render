@@ -30,6 +30,8 @@ function ensureArray(val, name) {
 }
 
 function assEscape(t) {
+  // Keep captions “natural” (no forced newlines), just escape ASS control chars.
+  // Also remove real line breaks to avoid any \n/\N weirdness.
   return String(t || "")
     .replace(/\r?\n/g, " ")
     .replace(/\s+/g, " ")
@@ -61,10 +63,13 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     if (lines.length >= maxLines - 1) break;
   }
 
+  // Push the last line
   if (cur && lines.length < maxLines) {
+    // If we broke early because we hit maxLines, append the rest to the last line
     const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
+      // Try to fit remaining into existing last line by wrapping again
       let last = cur;
       const restWords = remaining.split(" ");
       for (const w of restWords) {
@@ -77,8 +82,10 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     lines.push(cur);
   }
 
+  // If still somehow empty, fallback
   if (!lines.length) return t;
 
+  // ASS newline is \N
   return lines.join("\\N");
 }
 
@@ -180,19 +187,22 @@ app.post("/render", async (req, res) => {
     if (!audio_url) throw new Error("audio_url is required");
     if (!end_card_url) throw new Error("end_card_url is required");
     ensureArray(images, "images");
-    if (images.length !== 3) throw new Error("images must have exactly 3 URLs");
+    if (images.length !== 4) throw new Error("images must have exactly 4 URLs");
     ensureArray(captions, "captions");
 
     const workDir = tmp.dirSync({ unsafeCleanup: true }).name;
 
-    const audioPath = path.join(workDir, "audio.mp3");
     const img1Path = path.join(workDir, "img1.png");
     const img2Path = path.join(workDir, "img2.png");
     const img3Path = path.join(workDir, "img3.png");
+    const img4Path = path.join(workDir, "img4.png");
     const endPath = path.join(workDir, "end.png");
+
+    const audioPath = path.join(workDir, "audio.mp3");
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
+    // End card slogan audio
     const sloganMp3Path = path.join(workDir, "end_card_audio.mp3");
     const sloganWavPath = path.join(workDir, "end_card_audio.wav");
 
@@ -202,11 +212,12 @@ app.post("/render", async (req, res) => {
     console.log("[render] has end_card_audio_url:", hasEndCardAudio ? "YES" : "NO");
     if (hasEndCardAudio) console.log("[render] end_card_audio_url:", sloganUrl);
 
-    await downloadToFile(audio_url, audioPath);
     await downloadToFile(images[0], img1Path);
     await downloadToFile(images[1], img2Path);
     await downloadToFile(images[2], img3Path);
+    await downloadToFile(images[3], img4Path);
     await downloadToFile(end_card_url, endPath);
+    await downloadToFile(audio_url, audioPath);
 
     if (hasEndCardAudio) {
       await downloadToFile(sloganUrl, sloganMp3Path);
@@ -249,6 +260,7 @@ app.post("/render", async (req, res) => {
       }
     }
 
+    // Probe main audio duration
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
@@ -278,34 +290,41 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
+    // === SLIDES TIMING: image 1 lasts exactly segment 1; remaining split equally into 3 ===
     const seg1Ms = scaledCaptions.length
       ? Math.max(1, Math.round(Number(scaledCaptions[0].end_ms)))
-      : Math.floor(effectiveAudioMs / 3);
+      : Math.floor(effectiveAudioMs / 4);
 
     const remaining = Math.max(0, effectiveAudioMs - seg1Ms);
-    const seg2Ms = Math.floor(remaining / 2);
-    const seg3Ms = Math.max(0, remaining - seg2Ms);
+    const seg2Ms = Math.floor(remaining / 3);
+    const seg3Ms = Math.floor(remaining / 3);
+    const seg4Ms = Math.max(0, remaining - seg2Ms - seg3Ms);
 
     const seg1 = seg1Ms;
     const seg2 = seg2Ms;
     const seg3 = seg3Ms;
+    const seg4 = seg4Ms;
+    // ============================================================================
 
-    const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3));
+    const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    const titleFontSize = 150;
+    // =========================
+    // SUBTITLE STYLES (ASS)
+    // =========================
+    const titleFontSize = 150; // +50% from old
     const titleOutline = 5;
 
-    const captionFontSize = 100;
+    const captionFontSize = 100; // match old title look
     const captionOutline = 3;
 
-    const marginLR = Math.round(w * 0.10);
-    const marginV = Math.round(h * 0.16);
+    const marginLR = Math.round(w * 0.10); // 10% left/right
+    const marginV = Math.round(h * 0.16); // bottom captions placement
 
-    const titleMarginV = Math.round(h * 0.34);
+    const titleMarginV = Math.round(h * 0.34); // title placement
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -331,7 +350,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     function msToAssTime(ms) {
       const t = Math.max(0, Number(ms) || 0);
-      const cs = Math.floor(t / 10);
+      const cs = Math.floor(t / 10); // centiseconds
       const hh = Math.floor(cs / 360000);
       const mm = Math.floor((cs % 360000) / 6000);
       const ss = Math.floor((cs % 6000) / 100);
@@ -360,32 +379,44 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
+    // -------------------------
+    // Build filter_complex
+    // -------------------------
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
       `[2:v]${coverCrop}[v2]`,
       `[3:v]${coverCrop}[v3]`,
+      `[4:v]${coverCrop}[v4]`,
 
       `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
       `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
       `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
-      `[s0][s1][s2]concat=n=3:v=1:a=0[slideshow]`,
+      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
+      `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
 
+      // Burn-in ASS subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      `[v3]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
+      `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
+    // -------------------------
+    // AUDIO
+    // - VO only during slideshow
+    // - silence during end card
+    // - slogan starts at end card + 0.2s
+    // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
     const sloganStartSec = endCardStartSec + 0.2;
     const sloganDelayMs = Math.max(0, Math.round(sloganStartSec * 1000));
 
-    // Main VO: trim to slideshow, then pad silence through end card, then trim to total
+    // Main VO is input #5:a
     filterParts.push(
-      `[4:a]asetpts=PTS-STARTPTS,` +
+      `[5:a]asetpts=PTS-STARTPTS,` +
         `atrim=0:${endCardStartSec.toFixed(3)},` +
         `apad=pad_dur=${(endCardDurMs / 1000 + 2).toFixed(3)},` +
         `atrim=0:${totalDurSec.toFixed(3)}` +
@@ -393,11 +424,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     );
 
     if (hasEndCardAudio) {
-      // ✅ FIX: fade/volume BEFORE delay (otherwise fade-out happens during the 19s silence and kills the slogan)
+      // Slogan is input #6:a (wav)
       const fadeIn = 0.12;
 
       filterParts.push(
-        `[5:a]asetpts=PTS-STARTPTS,` +
+        `[6:a]asetpts=PTS-STARTPTS,` +
           `afade=t=in:st=0:d=${fadeIn},` +
           `volume=1.35,` +
           `adelay=${sloganDelayMs}|${sloganDelayMs}` +
@@ -434,6 +465,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       (seg3 / 1000).toFixed(3),
       "-i",
       img3Path,
+
+      "-loop",
+      "1",
+      "-t",
+      (seg4 / 1000).toFixed(3),
+      "-i",
+      img4Path,
 
       "-loop",
       "1",
