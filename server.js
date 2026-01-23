@@ -166,97 +166,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-// --- NEW: rounded rectangle ASS drawing (for subtitle background) ---
-function roundedRectPath(w, h, r) {
-  // Coordinates in ASS drawing units.
-  // We'll draw a rounded rect whose bottom-center is at (0,0).
-  // Rect bounds: left=-w/2, right=+w/2, top=-h, bottom=0
-  const halfW = w / 2;
-  const left = -halfW;
-  const right = halfW;
-  const top = -h;
-  const bottom = 0;
-
-  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-
-  // Using cubic Bezier corners: b x1 y1 x2 y2 x3 y3
-  // Start at (left+rr, top)
-  const x0 = left + rr;
-  const y0 = top;
-
-  const x1 = right - rr;
-  const y1 = top;
-
-  const x2 = right;
-  const y2 = top + rr;
-
-  const x3 = right;
-  const y3 = bottom - rr;
-
-  const x4 = right - rr;
-  const y4 = bottom;
-
-  const x5 = left + rr;
-  const y5 = bottom;
-
-  const x6 = left;
-  const y6 = bottom - rr;
-
-  const x7 = left;
-  const y7 = top + rr;
-
-  // Approx bezier control distance for quarter circle
-  const k = 0.5522847498;
-
-  const c = (a, b) => a + (b - a) * k;
-
-  // Top-right corner controls
-  const tr1x = c(x1, right);
-  const tr1y = y1;
-  const tr2x = right;
-  const tr2y = c(y1, y2);
-
-  // Bottom-right corner controls
-  const br1x = right;
-  const br1y = c(y3, y4);
-  const br2x = c(right, x4);
-  const br2y = y4;
-
-  // Bottom-left corner controls
-  const bl1x = c(x5, left);
-  const bl1y = y5;
-  const bl2x = left;
-  const bl2y = c(y5, y6);
-
-  // Top-left corner controls
-  const tl1x = left;
-  const tl1y = c(y7, y0);
-  const tl2x = c(left, x0);
-  const tl2y = y0;
-
-  const n = (v) => Math.round(v);
-
-  // Build path
-  // m x y
-  // l x y
-  // b x1 y1 x2 y2 x3 y3
-  let p = "";
-  p += `m ${n(x0)} ${n(y0)} `;
-  p += `l ${n(x1)} ${n(y1)} `;
-  // top-right bezier to (right, top+rr)
-  p += `b ${n(tr1x)} ${n(tr1y)} ${n(tr2x)} ${n(tr2y)} ${n(x2)} ${n(y2)} `;
-  p += `l ${n(x3)} ${n(y3)} `;
-  // bottom-right bezier to (right-rr, bottom)
-  p += `b ${n(br1x)} ${n(br1y)} ${n(br2x)} ${n(br2y)} ${n(x4)} ${n(y4)} `;
-  p += `l ${n(x5)} ${n(y5)} `;
-  // bottom-left bezier to (left, bottom-rr)
-  p += `b ${n(bl1x)} ${n(bl1y)} ${n(bl2x)} ${n(bl2y)} ${n(x6)} ${n(y6)} `;
-  p += `l ${n(x7)} ${n(y7)} `;
-  // top-left bezier back to (left+rr, top)
-  p += `b ${n(tl1x)} ${n(tl1y)} ${n(tl2x)} ${n(tl2y)} ${n(x0)} ${n(y0)} `;
-  return p.trim();
-}
-
 app.post("/render", async (req, res) => {
   const {
     audio_url,
@@ -428,13 +337,12 @@ app.post("/render", async (req, res) => {
     // =========================
     // SUBTITLE STYLES (ASS)
     // Title: NO box
-    // Caption: rounded semi-transparent grey background via ASS drawing behind text
+    // Caption: semi-transparent grey background box + softer edges (shadow + slight blur override)
     // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
     const captionFontSize = 100;
-    const captionOutlineForStroke = 3;
 
     const marginLR = Math.round(w * 0.10);
     const marginV = Math.round(h * 0.16);
@@ -446,21 +354,16 @@ app.post("/render", async (req, res) => {
     const capMaxCharsPerLine = 18;
     const capMaxLines = 5;
 
-    // Rounded background tuning
-    const capBgAlpha = "80"; // 00 opaque, FF transparent (80 ~ 50% transparent)
-    const capBgGrayBGR = "2A2A2A"; // dark grey
-    const capBgPrimary = `&H${capBgAlpha}${capBgGrayBGR}`;
-
-    const capBgPadding = 26;     // inner padding around text
-    const capBgRadius = 22;      // corner radius
-    const capBgBlur = 6;         // soft edges on the box
-
-    // For width estimation (auto box sizing)
-    const estCharW = captionFontSize * 0.58; // tuned for DejaVu Sans Bold-ish look
-    const estLineH = captionFontSize * 1.15;
-
-    const cx = Math.round(w / 2);
-    const cyCaption = Math.round(h - marginV);
+    // Caption box: BackColour uses &HAABBGGRR (AA alpha; 00 opaque, FF transparent)
+    // Tweaks:
+    // - slightly more transparent (A0)
+    // - dark grey box
+    // - add shadow for soft edges
+    const capBoxAlpha = "A0"; // more transparent than before -> "a little" dark
+    const capBoxGrayBGR = "1E1E1E"; // dark gray
+    const capBackColour = `&H${capBoxAlpha}${capBoxGrayBGR}`;
+    const capBoxPadding = 18; // padding around text (BorderStyle=3 uses Outline as padding)
+    const capShadow = 6; // soft edge feel (shadow fade)
 
     const header = `[Script Info]
 ScriptType: v4.00+
@@ -472,8 +375,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
-Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutlineForStroke},0,2,${marginLR},${marginLR},${marginV},1
-Style: CapBG,DejaVu Sans,${captionFontSize},${capBgPrimary},${capBgPrimary},${capBgPrimary},${capBgPrimary},0,0,0,0,100,100,0,0,1,0,0,2,0,0,0,1
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,${capBackColour},-1,0,0,0,100,100,0,0,3,${capBoxPadding},${capShadow},2,${marginLR},${marginLR},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -498,38 +400,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const end = msToAssTime(c.end_ms);
 
       if (i === 0) {
-        // Title (no bg)
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
-        ass += `Dialogue: 1,${start},${end},Title,,0,0,0,,${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${wrapped}\n`;
       } else {
-        // Caption with rounded bg
-        const plain = String(c.text || "").replace(/\s+/g, " ").trim();
+        const raw = assEscape(c.text);
+        const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
 
-        // Wrap for measuring and for output (keep consistent)
-        const wrappedMeasure = wrapByChars(plain, capMaxCharsPerLine, capMaxLines);
-        const lines = wrappedMeasure.split("\\N");
-        const maxLen = lines.reduce((m, s) => Math.max(m, (s || "").length), 0);
-        const lineCount = Math.max(1, lines.length);
-
-        // Estimate box size and clamp to safe width
-        let boxW = Math.round(maxLen * estCharW + capBgPadding * 2);
-        const maxBoxW = w - marginLR * 2;
-        if (boxW > maxBoxW) boxW = maxBoxW;
-
-        const boxH = Math.round(lineCount * estLineH + capBgPadding * 2);
-        const radius = Math.min(capBgRadius, Math.floor(boxW / 2), Math.floor(boxH / 2));
-
-        const bgPath = roundedRectPath(boxW, boxH, radius);
-
-        // Background layer (drawing)
-        // an2 + pos(center, bottomCaptionY), draw box from (-W/2,-H) to (W/2,0)
-        ass += `Dialogue: 0,${start},${end},CapBG,,0,0,0,,{\\an2\\pos(${cx},${cyCaption})\\p1\\blur${capBgBlur}}${bgPath}{\\p0}\n`;
-
-        // Text layer on top
-        const safe = assEscape(plain);
-        const wrapped = wrapByChars(safe, capMaxCharsPerLine, capMaxLines);
-        ass += `Dialogue: 1,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
+        // Soft edges trick:
+        // - keep box semi-transparent
+        // - add shadow in style (capShadow)
+        // - add a tiny blur override to soften the box edges a bit (minimal impact on text)
+        const softOverride = "{\\blur1.2}";
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${softOverride}${wrapped}\n`;
       }
     }
 
@@ -551,8 +434,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const denom = Math.max(1, frames - 1);
 
       const z = `1+(${zoomDelta})*(on/${denom})`;
-      const x = `(iw-ow)/2`;
-      const y = `(ih-oh)/2`;
+      const x = "(iw-ow)/2";
+      const y = "(ih-oh)/2";
 
       return (
         `[${tagIn}]` +
