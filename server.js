@@ -336,13 +336,12 @@ app.post("/render", async (req, res) => {
 
     // =========================
     // SUBTITLE STYLES (ASS)
-    // Title: NO box
-    // Caption: semi-transparent grey background box + softer edges (shadow + slight blur override)
     // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
     const captionFontSize = 100;
+    const captionOutline = 3;
 
     const marginLR = Math.round(w * 0.10);
     const marginV = Math.round(h * 0.16);
@@ -354,17 +353,6 @@ app.post("/render", async (req, res) => {
     const capMaxCharsPerLine = 18;
     const capMaxLines = 5;
 
-    // Caption box: BackColour uses &HAABBGGRR (AA alpha; 00 opaque, FF transparent)
-    // Tweaks:
-    // - slightly more transparent (A0)
-    // - dark grey box
-    // - add shadow for soft edges
-    const capBoxAlpha = "A0"; // more transparent than before -> "a little" dark
-    const capBoxGrayBGR = "1E1E1E"; // dark gray
-    const capBackColour = `&H${capBoxAlpha}${capBoxGrayBGR}`;
-    const capBoxPadding = 18; // padding around text (BorderStyle=3 uses Outline as padding)
-    const capShadow = 6; // soft edge feel (shadow fade)
-
     const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${w}
@@ -375,7 +363,8 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
-Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,${capBackColour},-1,0,0,0,100,100,0,0,3,${capBoxPadding},${capShadow},2,${marginLR},${marginLR},${marginV},1
+// CHANGE: Caption now uses the same centered placement as Title (Alignment=8 + MarginV=titleMarginV)
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -406,13 +395,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       } else {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
-
-        // Soft edges trick:
-        // - keep box semi-transparent
-        // - add shadow in style (capShadow)
-        // - add a tiny blur override to soften the box edges a bit (minimal impact on text)
-        const softOverride = "{\\blur1.2}";
-        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${softOverride}${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
       }
     }
 
@@ -420,22 +403,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     // ==========================================================
     // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
-    // Increase motion on images 2/3/4 (more zoom).
+    // Use zoompan with centered x/y at all times.
+    // Hook zoom stronger, others more subtle. End card static.
     // ==========================================================
     const baseScale = 1.32;
     const baseW = Math.ceil((w * baseScale) / 2) * 2;
     const baseH = Math.ceil((h * baseScale) / 2) * 2;
 
-    const hookZoomDelta = 0.14; // hook
-    const midZoomDelta = 0.12; // increased motion for images 2/3/4
+    const hookZoomDelta = 0.14; // stronger for hook
+    const midZoomDelta = 0.08; // subtle for mid slides
 
     function zoompanOnlyZoom(tagIn, tagOut, durMs, zoomDelta) {
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
       const denom = Math.max(1, frames - 1);
 
+      // Start slightly zoomed in, then push in more (smooth).
       const z = `1+(${zoomDelta})*(on/${denom})`;
-      const x = "(iw-ow)/2";
-      const y = "(ih-oh)/2";
+
+      // NO DRIFT: always centered
+      const x = `(iw-ow)/2`;
+      const y = `(ih-oh)/2`;
 
       return (
         `[${tagIn}]` +
@@ -460,7 +447,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      // No grain/noise
+      // NOISE FIX A: no temporal grain
       `[subbed]format=yuv420p[styled]`,
 
       `[4:v]${endCover}[v4]`,
