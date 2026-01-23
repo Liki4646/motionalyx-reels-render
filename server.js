@@ -406,11 +406,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     // ==========================================================
     // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
-    // FIX: zoom must stay locked to TRUE CENTER while zoom changes
+    //
+    // FIXES for "tremble"/micro-jitter:
+    // 1) Base scaling aligned to 16px (less rounding artifacts)
+    // 2) x/y CENTER locked with floor(...) (stable integer crop window)
+    // 3) Removed trim=duration=... after zoompan (avoid time-based frame dup/drop)
     // ==========================================================
     const baseScale = 1.32;
-    const baseW = Math.ceil((w * baseScale) / 2) * 2;
-    const baseH = Math.ceil((h * baseScale) / 2) * 2;
+
+    const baseW = Math.ceil((w * baseScale) / 16) * 16;
+    const baseH = Math.ceil((h * baseScale) / 16) * 16;
 
     const hookZoomDelta = 0.14; // stronger for hook
     const midZoomDelta = 0.08; // subtle for mid slides
@@ -422,16 +427,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       // Start slightly zoomed in, then push in more (smooth).
       const z = `1+(${zoomDelta})*(on/${denom})`;
 
-      // FIX: center should be computed based on current zoom (not output size),
-      // so it never "slides" sideways while zooming.
-      const x = `iw/2-(iw/zoom/2)`;
-      const y = `ih/2-(ih/zoom/2)`;
+      // Center locked to true center with integer stability (prevents left/right micro-jitter)
+      const x = `floor(iw/2-(iw/(2*zoom)))`;
+      const y = `floor(ih/2-(ih/(2*zoom)))`;
 
       return (
         `[${tagIn}]` +
         `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=lanczos,setsar=1,` +
         `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
-        `trim=duration=${(durMs / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p` +
+        `setpts=PTS-STARTPTS,format=yuv420p` +
         `[${tagOut}]`
       );
     }
