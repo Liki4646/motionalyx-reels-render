@@ -337,13 +337,12 @@ app.post("/render", async (req, res) => {
     // =========================
     // SUBTITLE STYLES (ASS)
     // Title: NO box
-    // Caption: semi-transparent grey background box that auto-sizes to text
+    // Caption: semi-transparent grey box with softened edges (rounded look)
     // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
     const captionFontSize = 100;
-    const captionOutlineForStroke = 3;
 
     const marginLR = Math.round(w * 0.10);
     const marginV = Math.round(h * 0.16);
@@ -355,12 +354,20 @@ app.post("/render", async (req, res) => {
     const capMaxCharsPerLine = 18;
     const capMaxLines = 5;
 
-    // Caption box: BackColour uses &HAABBGGRR (AA alpha; 00 opaque, FF transparent)
-    const capBoxAlpha = "80"; // ~50% transparent
-    const capBoxGrayBGR = "141414"; // dark gray
+    // ASS BackColour format: &HAABBGGRR
+    // AA: 00 opaque, FF transparent.
+    // Use a softer dark grey + higher transparency so image shows through.
+    const capBoxAlpha = "A8"; // more transparent than 80 (A8 ~ quite see-through)
+    const capBoxGrayBGR = "2A2A2A"; // dark grey (not pure black)
     const capBackColour = `&H${capBoxAlpha}${capBoxGrayBGR}`;
-    const capBoxPadding = 18; // padding around text (BorderStyle=3 uses Outline as padding)
-    const capShadow = 0; // keep crisp; can set to 2 if you want extra softness
+
+    // BorderStyle=3 => opaque box. Outline acts as padding.
+    const capBoxPadding = 14; // slightly tighter than 18 (cleaner)
+    const capShadow = 0;
+
+    // This is the key: edge blur on the event gives "rounded" feel.
+    // \be blurs the edges of border/box without destroying text readability too much.
+    const capEdgeBlur = 2; // 1-3 is typical. 2 looks nicely rounded.
 
     const header = `[Script Info]
 ScriptType: v4.00+
@@ -404,26 +411,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
 
-        // Keep text stroke (OutlineColour) + box (BackColour). In BorderStyle=3, Outline is padding.
-        // If you ever want a tiny stroke around letters, add an inline override:
-        // {\\bord3} ... but we keep it simple for now.
+        // Apply edge blur per-line (softens box corners/edges)
+        // Keep it subtle so the text stays sharp.
+        const overrides = `{\\be${capEdgeBlur}}`;
 
-        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${overrides}${wrapped}\n`;
       }
     }
 
     fs.writeFileSync(assPath, ass, "utf8");
 
     // ==========================================================
-    // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
-    // Increase motion on images 2/3/4 (more zoom).
+    // VIDEO MOTION (ONLY ZOOM, NO DRIFT)
     // ==========================================================
     const baseScale = 1.32;
     const baseW = Math.ceil((w * baseScale) / 2) * 2;
     const baseH = Math.ceil((h * baseScale) / 2) * 2;
 
-    const hookZoomDelta = 0.14; // hook
-    const midZoomDelta = 0.12; // increased motion for images 2/3/4
+    const hookZoomDelta = 0.14;
+    const midZoomDelta = 0.12;
 
     function zoompanOnlyZoom(tagIn, tagOut, durMs, zoomDelta) {
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
@@ -455,8 +461,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
-
-      // No grain/noise
       `[subbed]format=yuv420p[styled]`,
 
       `[4:v]${endCover}[v4]`,
@@ -552,7 +556,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
-      // FAST encode
       "-c:v",
       "libx264",
       "-preset",
