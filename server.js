@@ -15,6 +15,10 @@ app.use(express.json({ limit: "50mb" }));
 app.get("/", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
+// Increase buffers so FFmpeg/FFprobe stderr doesn't crash with "maxBuffer length exceeded"
+const EXEC_OPTS_FFMPEG = { maxBuffer: 1024 * 1024 * 50 }; // 50MB
+const EXEC_OPTS_FFPROBE = { maxBuffer: 1024 * 1024 * 10 }; // 10MB
+
 async function downloadToFile(url, outPath) {
   const r = await fetch(url, {
     redirect: "follow",
@@ -62,7 +66,9 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (cur && lines.length < maxLines) {
-    const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
+    const usedWords =
+      lines.join(" ").split(" ").filter(Boolean).length +
+      cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
       let last = cur;
@@ -222,21 +228,26 @@ app.post("/render", async (req, res) => {
         hasEndCardAudio = false;
       } else {
         try {
-          await execFileAsync("ffmpeg", [
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            sloganMp3Path,
-            "-ac",
-            "1",
-            "-ar",
-            "24000",
-            "-c:a",
-            "pcm_s16le",
-            sloganWavPath
-          ]);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-hide_banner",
+              "-loglevel",
+              "error",
+              "-nostdin",
+              "-i",
+              sloganMp3Path,
+              "-ac",
+              "1",
+              "-ar",
+              "24000",
+              "-c:a",
+              "pcm_s16le",
+              sloganWavPath
+            ],
+            EXEC_OPTS_FFMPEG
+          );
 
           const wavSize = fs.existsSync(sloganWavPath) ? fs.statSync(sloganWavPath).size : 0;
           console.log("[render] slogan wav bytes:", wavSize);
@@ -255,15 +266,19 @@ app.post("/render", async (req, res) => {
     // Probe main audio duration
     let audioMs = NaN;
     try {
-      const { stdout: probeOut } = await execFileAsync("ffprobe", [
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        audioPath
-      ]);
+      const { stdout: probeOut } = await execFileAsync(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          audioPath
+        ],
+        EXEC_OPTS_FFPROBE
+      );
       const audioSeconds = parseFloat(String(probeOut || "").trim());
       if (Number.isFinite(audioSeconds) && audioSeconds > 0) audioMs = Math.round(audioSeconds * 1000);
     } catch (_e) {
@@ -401,11 +416,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO FILTER
+    // VIDEO FILTER (Classic dissolve crossfade)
     const xfadeDur = 0.30;
-    const off1 = Math.max(0.001, seg1 / 1000 - xfadeDur);
-    const off2 = Math.max(0.001, (seg1 + seg2) / 1000 - 2 * xfadeDur);
-    const off3 = Math.max(0.001, (seg1 + seg2 + seg3) / 1000 - 3 * xfadeDur);
+
+    // Make sure each segment can accommodate the fade (avoid negative offsets)
+    const safeSeg1 = Math.max(seg1, Math.ceil(xfadeDur * 1000) + 1);
+    const safeSeg2 = Math.max(seg2, Math.ceil(xfadeDur * 1000) + 1);
+    const safeSeg3 = Math.max(seg3, Math.ceil(xfadeDur * 1000) + 1);
+    const safeSeg4 = Math.max(seg4, 1);
+
+    const off1 = Math.max(0.001, safeSeg1 / 1000 - xfadeDur);
+    const off2 = Math.max(0.001, (safeSeg1 + safeSeg2) / 1000 - 2 * xfadeDur);
+    const off3 = Math.max(0.001, (safeSeg1 + safeSeg2 + safeSeg3) / 1000 - 3 * xfadeDur);
 
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
@@ -414,12 +436,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[3:v]${coverCrop}[v3]`,
       `[4:v]${coverCrop}[v4]`,
 
-      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
-      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
-      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
-      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
+      `[v0]trim=duration=${(safeSeg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
+      `[v1]trim=duration=${(safeSeg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
+      `[v2]trim=duration=${(safeSeg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
+      `[v3]trim=duration=${(safeSeg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
 
-      // Classic dissolve crossfades between slides (fade)
       `[s0][s1]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off1.toFixed(3)}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off2.toFixed(3)}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off3.toFixed(3)}[slideshow]`,
@@ -465,32 +486,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const args = [
       "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-nostdin",
 
       "-loop",
       "1",
       "-t",
-      (seg1 / 1000).toFixed(3),
+      (safeSeg1 / 1000).toFixed(3),
       "-i",
       img1Path,
 
       "-loop",
       "1",
       "-t",
-      (seg2 / 1000).toFixed(3),
+      (safeSeg2 / 1000).toFixed(3),
       "-i",
       img2Path,
 
       "-loop",
       "1",
       "-t",
-      (seg3 / 1000).toFixed(3),
+      (safeSeg3 / 1000).toFixed(3),
       "-i",
       img3Path,
 
       "-loop",
       "1",
       "-t",
-      (seg4 / 1000).toFixed(3),
+      (safeSeg4 / 1000).toFixed(3),
       "-i",
       img4Path,
 
@@ -538,9 +563,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       outPath
     );
 
-    console.log("[render] ffmpeg args:", args.join(" "));
+    console.log("[render] ffmpeg starting...");
 
-    await execFileAsync("ffmpeg", args);
+    await execFileAsync("ffmpeg", args, EXEC_OPTS_FFMPEG);
 
     const mp4 = fs.readFileSync(outPath);
     res.setHeader("Content-Type", "video/mp4");
