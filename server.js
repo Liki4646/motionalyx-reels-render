@@ -62,7 +62,9 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (cur && lines.length < maxLines) {
-    const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
+    const usedWords =
+      lines.join(" ").split(" ").filter(Boolean).length +
+      cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
       let last = cur;
@@ -78,7 +80,6 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (!lines.length) return t;
-
   return lines.join("\\N");
 }
 
@@ -163,38 +164,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   if (out.length) out[out.length - 1].end_ms = audioMs;
 
   return out;
-}
-
-// FAST Ken Burns + Drift (linear; no trig)
-function kenBurnsDriftFast(labelIn, labelOut, durMs, w, h, fps, opts = {}) {
-  const frames = Math.max(2, Math.round((durMs / 1000) * fps));
-
-  const zoomMax = Number(opts.zoomMax ?? 1.06); // 1.05–1.07 recommended
-  const driftX = Number(opts.driftX ?? 0.035);  // 0.02–0.04 recommended
-  const driftY = Number(opts.driftY ?? 0.025);  // 0.015–0.03 recommended
-  const dirX = String(opts.dirX ?? "lr");       // "lr" or "rl"
-  const dirY = String(opts.dirY ?? "tb");       // "tb" or "bt"
-
-  const p = `on/${frames}`; // 0..1
-  const cx = `(iw-iw/zoom)/2`;
-  const cy = `(ih-ih/zoom)/2`;
-
-  const sx = `(iw-iw/zoom)*${driftX.toFixed(4)}`;
-  const sy = `(ih-ih/zoom)*${driftY.toFixed(4)}`;
-
-  const dx = dirX === "rl" ? `(${sx})*(0.5-(${p}))` : `(${sx})*(${p}-0.5)`;
-  const dy = dirY === "bt" ? `(${sy})*(0.5-(${p}))` : `(${sy})*(${p}-0.5)`;
-
-  return `[${labelIn}]` +
-    `scale=${w}:${h}:force_original_aspect_ratio=increase,` +
-    `crop=${w}:${h},setsar=1,` +
-    `zoompan=` +
-      `z='1+(${(zoomMax - 1).toFixed(4)})*${p}':` +
-      `x='${cx}+${dx}':` +
-      `y='${cy}+${dy}':` +
-      `d=${frames}:s=${w}x${h}:fps=${fps},` +
-    `format=yuv420p` +
-  `[${labelOut}]`;
 }
 
 app.post("/render", async (req, res) => {
@@ -308,7 +277,6 @@ app.post("/render", async (req, res) => {
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    // If probe failed, use last caption end as “audio”
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
@@ -317,11 +285,7 @@ app.post("/render", async (req, res) => {
 
     // =============================
     // SLIDES TIMING (SEGMENT-DRIVEN)
-    // 7 segments:
-    // - img1 = seg1
-    // - img2 = seg2+seg3
-    // - img3 = seg4+seg5
-    // - img4 = seg6+seg7
+    // seg1=img1, seg2+3=img2, seg4+5=img3, seg6+7=img4
     // =============================
     let seg1 = 0,
       seg2 = 0,
@@ -329,10 +293,10 @@ app.post("/render", async (req, res) => {
       seg4 = 0;
 
     if (scaledCaptions.length >= 7) {
-      const t1 = Math.round(Number(scaledCaptions[0].end_ms)); // end seg1
-      const t3 = Math.round(Number(scaledCaptions[2].end_ms)); // end seg3
-      const t5 = Math.round(Number(scaledCaptions[4].end_ms)); // end seg5
-      const t7 = Math.round(Number(scaledCaptions[6].end_ms)); // end seg7
+      const t1 = Math.round(Number(scaledCaptions[0].end_ms));
+      const t3 = Math.round(Number(scaledCaptions[2].end_ms));
+      const t5 = Math.round(Number(scaledCaptions[4].end_ms));
+      const t7 = Math.round(Number(scaledCaptions[6].end_ms));
 
       seg1 = Math.max(1, t1);
       seg2 = Math.max(1, t3 - t1);
@@ -341,7 +305,6 @@ app.post("/render", async (req, res) => {
 
       effectiveAudioMs = Math.max(effectiveAudioMs, t7);
     } else {
-      // Fallback: split into 4 equal parts if input is malformed
       const part = Math.floor(effectiveAudioMs / 4);
       seg1 = Math.max(1, part);
       seg2 = Math.max(1, part);
@@ -349,11 +312,31 @@ app.post("/render", async (req, res) => {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
+    // Faster crossfade
+    const fadeMs = 100;
+    const fadeSec = (fadeMs / 1000).toFixed(3);
+
+    // Extend first 3 inputs by fade to allow overlap in xfade
+    const seg1In = seg1 + fadeMs;
+    const seg2In = seg2 + fadeMs;
+    const seg3In = seg3 + fadeMs;
+    const seg4In = seg4;
+
+    const seg1Sec = seg1 / 1000;
+    const seg2Sec = seg2 / 1000;
+    const seg3Sec = seg3 / 1000;
+
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // SUBTITLES (ASS)
+    const off1 = (seg1Sec - fadeMs / 1000).toFixed(3);
+    const off2 = (seg1Sec + seg2Sec - fadeMs / 1000).toFixed(3);
+    const off3 = (seg1Sec + seg2Sec + seg3Sec - fadeMs / 1000).toFixed(3);
+
+    // =========================
+    // SUBTITLE STYLES (ASS)
+    // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -399,9 +382,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     let ass = header;
 
-    // cheap fade for text (keeps it lively but fast)
-    const FX = "{\\fad(90,90)}";
-
     for (let i = 0; i < scaledCaptions.length; i++) {
       const c = scaledCaptions[i];
       const start = msToAssTime(c.start_ms);
@@ -410,50 +390,74 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       if (i === 0) {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
-        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${FX}${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${wrapped}\n`;
       } else {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
-        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${FX}${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
       }
     }
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO FILTER (Ken Burns + Drift, fast)
-    const seg1s = seg1 / 1000;
-    const seg2s = seg2 / 1000;
-    const seg3s = seg3 / 1000;
-    const seg4s = seg4 / 1000;
+    // ==========================================================
+    // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
+    // Use zoompan with centered x/y at all times.
+    // Hook zoom stronger, others more subtle. End card static.
+    // ==========================================================
+    const baseScale = 1.32;
+    const baseW = Math.ceil((w * baseScale) / 2) * 2;
+    const baseH = Math.ceil((h * baseScale) / 2) * 2;
 
-    const fadeD = 0.16;
+    const hookZoomDelta = 0.14; // stronger for hook
+    const midZoomDelta = 0.08; // subtle for mid slides
+
+    function zoompanOnlyZoom(tagIn, tagOut, durMs, zoomDelta) {
+      const frames = Math.max(2, Math.round((durMs / 1000) * fps));
+      const denom = Math.max(1, frames - 1);
+
+      // Start slightly zoomed in, then push in more (smooth).
+      const z = `1+(${zoomDelta})*(on/${denom})`;
+
+      // NO DRIFT: always centered
+      const x = `(iw-ow)/2`;
+      const y = `(ih-oh)/2`;
+
+      return (
+        `[${tagIn}]` +
+        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=lanczos,setsar=1,` +
+        `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
+        `trim=duration=${(durMs / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p` +
+        `[${tagOut}]`
+      );
+    }
+
+    const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const filterParts = [
-      // 4 slides with different drift directions
-      kenBurnsDriftFast("0:v", "s0", seg1, w, h, fps, { zoomMax: 1.06, driftX: 0.035, driftY: 0.025, dirX: "lr", dirY: "tb" }),
-      kenBurnsDriftFast("1:v", "s1", seg2, w, h, fps, { zoomMax: 1.06, driftX: 0.035, driftY: 0.025, dirX: "rl", dirY: "tb" }),
-      kenBurnsDriftFast("2:v", "s2", seg3, w, h, fps, { zoomMax: 1.06, driftX: 0.035, driftY: 0.025, dirX: "lr", dirY: "bt" }),
-      kenBurnsDriftFast("3:v", "s3", seg4, w, h, fps, { zoomMax: 1.06, driftX: 0.035, driftY: 0.025, dirX: "rl", dirY: "bt" }),
+      zoompanOnlyZoom("0:v", "s0", seg1In, hookZoomDelta),
+      zoompanOnlyZoom("1:v", "s1", seg2In, midZoomDelta),
+      zoompanOnlyZoom("2:v", "s2", seg3In, midZoomDelta),
+      zoompanOnlyZoom("3:v", "s3", seg4In, midZoomDelta),
 
-      // subtle fades (fast & robust)
-      `[s0]fade=t=in:st=0:d=${fadeD},fade=t=out:st=${Math.max(0, seg1s - fadeD).toFixed(3)}:d=${fadeD}[f0]`,
-      `[s1]fade=t=in:st=0:d=${fadeD},fade=t=out:st=${Math.max(0, seg2s - fadeD).toFixed(3)}:d=${fadeD}[f1]`,
-      `[s2]fade=t=in:st=0:d=${fadeD},fade=t=out:st=${Math.max(0, seg3s - fadeD).toFixed(3)}:d=${fadeD}[f2]`,
-      `[s3]fade=t=in:st=0:d=${fadeD},fade=t=out:st=${Math.max(0, seg4s - fadeD).toFixed(3)}:d=${fadeD}[f3]`,
+      `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
+      `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
+      `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
-      `[f0][f1][f2][f3]concat=n=4:v=1:a=0[slideshow]`,
-
-      // burn-in subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      // end card (static for speed)
-      `[4:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p[endraw]`,
-      `[endraw]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
+      // NOISE FIX A: no temporal grain
+      `[subbed]format=yuv420p[styled]`,
 
-      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
+      `[4:v]${endCover}[v4]`,
+      `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
+
+      `[styled][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
+    // -------------------------
     // AUDIO
+    // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
@@ -464,19 +468,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[5:a]asetpts=PTS-STARTPTS,` +
         `atrim=0:${endCardStartSec.toFixed(3)},` +
         `apad=pad_dur=${(endCardDurMs / 1000 + 2).toFixed(3)},` +
-        `atrim=0:${totalDurSec.toFixed(3)}` +
-        `[amain]`
+        `atrim=0:${totalDurSec.toFixed(3)}[amain]`
     );
 
     if (hasEndCardAudio) {
       const fadeIn = 0.12;
-
       filterParts.push(
-        `[6:a]asetpts=PTS-STARTPTS,` +
-          `afade=t=in:st=0:d=${fadeIn},` +
-          `volume=1.35,` +
-          `adelay=${sloganDelayMs}|${sloganDelayMs}` +
-          `[aslogan]`,
+        `[6:a]asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeIn},volume=1.35,adelay=${sloganDelayMs}|${sloganDelayMs}[aslogan]`,
         `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
         `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
       );
@@ -492,28 +490,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-loop",
       "1",
       "-t",
-      (seg1 / 1000).toFixed(3),
+      (seg1In / 1000).toFixed(3),
       "-i",
       img1Path,
 
       "-loop",
       "1",
       "-t",
-      (seg2 / 1000).toFixed(3),
+      (seg2In / 1000).toFixed(3),
       "-i",
       img2Path,
 
       "-loop",
       "1",
       "-t",
-      (seg3 / 1000).toFixed(3),
+      (seg3In / 1000).toFixed(3),
       "-i",
       img3Path,
 
       "-loop",
       "1",
       "-t",
-      (seg4 / 1000).toFixed(3),
+      (seg4In / 1000).toFixed(3),
       "-i",
       img4Path,
 
@@ -544,14 +542,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
+      // FAST encode
       "-c:v",
       "libx264",
       "-preset",
-      "veryfast",
+      "ultrafast",
       "-crf",
       "23",
       "-pix_fmt",
       "yuv420p",
+      "-profile:v",
+      "high",
+      "-level",
+      "4.1",
 
       "-c:a",
       "aac",
@@ -562,7 +565,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     );
 
     console.log("[render] ffmpeg args:", args.join(" "));
-
     await execFileAsync("ffmpeg", args);
 
     const mp4 = fs.readFileSync(outPath);
