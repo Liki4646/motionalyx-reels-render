@@ -285,11 +285,7 @@ app.post("/render", async (req, res) => {
 
     // =============================
     // SLIDES TIMING (SEGMENT-DRIVEN)
-    // 7 segments:
-    // - img1 = seg1
-    // - img2 = seg2+seg3
-    // - img3 = seg4+seg5
-    // - img4 = seg6+seg7
+    // seg1=img1, seg2+3=img2, seg4+5=img3, seg6+7=img4
     // =============================
     let seg1 = 0,
       seg2 = 0,
@@ -320,7 +316,7 @@ app.post("/render", async (req, res) => {
     const fadeMs = 100;
     const fadeSec = (fadeMs / 1000).toFixed(3);
 
-    // Extend first 3 sources by fade to allow overlap
+    // Extend first 3 inputs by fade to allow overlap in xfade
     const seg1In = seg1 + fadeMs;
     const seg2In = seg2 + fadeMs;
     const seg3In = seg3 + fadeMs;
@@ -334,7 +330,6 @@ app.post("/render", async (req, res) => {
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // xfade offsets based on true boundaries (not segIn)
     const off1 = (seg1Sec - fadeMs / 1000).toFixed(3);
     const off2 = (seg1Sec + seg2Sec - fadeMs / 1000).toFixed(3);
     const off3 = (seg1Sec + seg2Sec + seg3Sec - fadeMs / 1000).toFixed(3);
@@ -406,53 +401,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // ==========================================================
-    // FILTER COMPLEX (FAST + FIXED crop eval)
-    // - Ken Burns via animated crop (eval=frame) + safe integer/even + clamp
-    // - Hook has stronger push-in
-    // - Crossfade 0.10s
-    // - Subtle grain only on slideshow
-    // - End card static
+    // VIDEO MOTION (FFmpeg 5.1 compatible)
+    // Use zoompan (Ken Burns) instead of crop eval.
+    // Hook = stronger push-in, others subtle.
     // ==========================================================
-    const baseScale = 1.18;
+    const baseScale = 1.22; // little extra buffer for pan/zoom
     const baseW = Math.ceil(w * baseScale);
     const baseH = Math.ceil(h * baseScale);
-
-    const coverToBase = `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase,crop=${baseW}:${baseH},setsar=1,fps=${fps}`;
-    const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const hookZoomDelta = 0.08;
     const midZoomDelta = 0.04;
 
-    function kbChain(tagIn, tagOut, durSec, zoomDelta, panX, panY) {
-      const D = Math.max(0.001, durSec);
+    function zoompanChain(tagIn, tagOut, durMs, zoomDelta, panX, panY) {
+      const frames = Math.max(2, Math.round((durMs / 1000) * fps));
+      const denom = Math.max(1, frames - 1);
 
-      // Make crop sizes integer + even (yuv420p friendly)
-      const wRaw = `${w}*(1+${zoomDelta}*(1-(t/${D})))`;
-      const hRaw = `${h}*(1+${zoomDelta}*(1-(t/${D})))`;
-      const wEven = `max(${w}, floor((${wRaw})/2)*2)`;
-      const hEven = `max(${h}, floor((${hRaw})/2)*2)`;
+      const z = `1+(${zoomDelta})*(on/${denom})`;
 
-      // Clamp x/y to valid range
-      const xBase = `(iw-ow)/2 + (iw-ow)*${panX}*(t/${D})`;
-      const yBase = `(ih-oh)/2 + (ih-oh)*${panY}*(t/${D})`;
-      const xClamp = `max(0, min(iw-ow, ${xBase}))`;
-      const yClamp = `max(0, min(ih-oh, ${yBase}))`;
+      const x = `max(0,min(iw-ow,(iw-ow)/2 + (iw-ow)*(${panX})*(on/${denom})))`;
+      const y = `max(0,min(ih-oh,(ih-oh)/2 + (ih-oh)*(${panY})*(on/${denom})))`;
 
-      return `[${tagIn}]trim=duration=${durSec.toFixed(3)},setpts=PTS-STARTPTS,` +
-        `crop=w='${wEven}':h='${hEven}':x='${xClamp}':y='${yClamp}':eval=frame,` +
-        `scale=${w}:${h},format=yuv420p[${tagOut}]`;
+      return (
+        `[${tagIn}]` +
+        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase,setsar=1,` +
+        `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
+        `trim=duration=${(durMs / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p` +
+        `[${tagOut}]`
+      );
     }
 
-    const filterParts = [
-      `[0:v]${coverToBase}[b0]`,
-      `[1:v]${coverToBase}[b1]`,
-      `[2:v]${coverToBase}[b2]`,
-      `[3:v]${coverToBase}[b3]`,
+    const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-      kbChain("b0", "s0", seg1In / 1000, hookZoomDelta, 0.05, -0.02),
-      kbChain("b1", "s1", seg2In / 1000, midZoomDelta, -0.04, 0.03),
-      kbChain("b2", "s2", seg3In / 1000, midZoomDelta, 0.03, -0.04),
-      kbChain("b3", "s3", seg4In / 1000, midZoomDelta, -0.03, 0.02),
+    const filterParts = [
+      zoompanChain("0:v", "s0", seg1In, hookZoomDelta, 0.05, -0.02),
+      zoompanChain("1:v", "s1", seg2In, midZoomDelta, -0.04, 0.03),
+      zoompanChain("2:v", "s2", seg3In, midZoomDelta, 0.03, -0.04),
+      zoompanChain("3:v", "s3", seg4In, midZoomDelta, -0.03, 0.02),
 
       `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
