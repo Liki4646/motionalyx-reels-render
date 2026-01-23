@@ -253,7 +253,6 @@ app.post("/render", async (req, res) => {
       }
     }
 
-    // Probe main audio duration
     let audioMs = NaN;
     try {
       const { stdout: probeOut } = await execFileAsync("ffprobe", [
@@ -283,10 +282,7 @@ app.post("/render", async (req, res) => {
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // =============================
-    // SLIDES TIMING (SEGMENT-DRIVEN)
     // seg1=img1, seg2+3=img2, seg4+5=img3, seg6+7=img4
-    // =============================
     let seg1 = 0,
       seg2 = 0,
       seg3 = 0,
@@ -312,11 +308,9 @@ app.post("/render", async (req, res) => {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
-    // Faster crossfade
     const fadeMs = 100;
     const fadeSec = (fadeMs / 1000).toFixed(3);
 
-    // Extend first 3 inputs by fade to allow overlap in xfade
     const seg1In = seg1 + fadeMs;
     const seg2In = seg2 + fadeMs;
     const seg3In = seg3 + fadeMs;
@@ -334,12 +328,9 @@ app.post("/render", async (req, res) => {
     const off2 = (seg1Sec + seg2Sec - fadeMs / 1000).toFixed(3);
     const off3 = (seg1Sec + seg2Sec + seg3Sec - fadeMs / 1000).toFixed(3);
 
-    // =========================
-    // SUBTITLE STYLES (ASS)
-    // =========================
+    // ASS subtitles
     const titleFontSize = 150;
     const titleOutline = 5;
-
     const captionFontSize = 100;
     const captionOutline = 3;
 
@@ -349,7 +340,6 @@ app.post("/render", async (req, res) => {
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
-
     const capMaxCharsPerLine = 18;
     const capMaxLines = 5;
 
@@ -400,30 +390,32 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // ==========================================================
-    // VIDEO MOTION (FFmpeg 5.1 compatible)
-    // Use zoompan (Ken Burns) instead of crop eval.
-    // Movement increased (hook most, others moderate).
-    // ==========================================================
-    const baseScale = 1.32; // increased buffer for stronger zoom/pan
-    const baseW = Math.ceil((w * baseScale) / 2) * 2; // keep even dims
-    const baseH = Math.ceil((h * baseScale) / 2) * 2; // keep even dims
+    // ==========================
+    // Motion (drift kept, jitter-reduced)
+    // ==========================
+    const baseScale = 1.34;
+    const baseW = Math.ceil((w * baseScale) / 2) * 2;
+    const baseH = Math.ceil((h * baseScale) / 2) * 2;
 
-    const hookZoomDelta = 0.14; // was 0.08
-    const midZoomDelta = 0.08; // was 0.04
+    // Increased drift + premium zoom
+    const hookZoomDelta = 0.14;
+    const midZoomDelta = 0.08;
 
-    function zoompanChain(tagIn, tagOut, durMs, zoomDelta, panX, panY) {
+    function zoompanChain(tagIn, tagOut, durMs, zoomDelta, driftXpx, driftYpx) {
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
       const denom = Math.max(1, frames - 1);
 
-      const z = `1+(${zoomDelta})*(on/${denom})`;
+      // Smooth ease-in-out
+      const ease = `(1-cos(PI*on/${denom}))/2`;
+      const z = `1+(${zoomDelta})*${ease}`;
 
-      const x = `max(0,min(iw-ow,(iw-ow)/2 + (iw-ow)*(${panX})*(on/${denom})))`;
-      const y = `max(0,min(ih-oh,(ih-oh)/2 + (ih-oh)*(${panY})*(on/${denom})))`;
+      // Pixel-based drift + integer coords to reduce micro jitter
+      const x = `floor((iw-ow)/2 + (${driftXpx})*${ease})`;
+      const y = `floor((ih-oh)/2 + (${driftYpx})*${ease})`;
 
       return (
         `[${tagIn}]` +
-        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase,setsar=1,` +
+        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=lanczos,setsar=1,` +
         `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
         `trim=duration=${(durMs / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p` +
         `[${tagOut}]`
@@ -433,21 +425,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const filterParts = [
-      // Hook: strongest, noticeable push-in + gentle drift
-      zoompanChain("0:v", "s0", seg1In, hookZoomDelta, 0.09, -0.05),
-
-      // Mid images: moderate motion, different directions
-      zoompanChain("1:v", "s1", seg2In, midZoomDelta, -0.07, 0.06),
-      zoompanChain("2:v", "s2", seg3In, midZoomDelta, 0.06, -0.07),
-      zoompanChain("3:v", "s3", seg4In, midZoomDelta, -0.06, 0.05),
+      // Drift "na bolj" (pixels over segment)
+      zoompanChain("0:v", "s0", seg1In, hookZoomDelta, 70, -44),
+      zoompanChain("1:v", "s1", seg2In, midZoomDelta, -56, 40),
+      zoompanChain("2:v", "s2", seg3In, midZoomDelta, 52, -58),
+      zoompanChain("3:v", "s3", seg4In, midZoomDelta, -48, 46),
 
       `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
-
-      // NOISE FIX A: remove temporal grain completely
       `[subbed]format=yuv420p[styled]`,
 
       `[4:v]${endCover}[v4]`,
@@ -456,9 +444,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[styled][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
-    // -------------------------
-    // AUDIO
-    // -------------------------
+    // Audio
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
@@ -543,7 +529,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
-      // FAST encode
       "-c:v",
       "libx264",
       "-preset",
