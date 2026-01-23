@@ -30,8 +30,6 @@ function ensureArray(val, name) {
 }
 
 function assEscape(t) {
-  // Keep captions “natural” (no forced newlines), just escape ASS control chars.
-  // Also remove real line breaks to avoid any \n/\N weirdness.
   return String(t || "")
     .replace(/\r?\n/g, " ")
     .replace(/\s+/g, " ")
@@ -63,13 +61,10 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     if (lines.length >= maxLines - 1) break;
   }
 
-  // Push the last line
   if (cur && lines.length < maxLines) {
-    // If we broke early because we hit maxLines, append the rest to the last line
     const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
-      // Try to fit remaining into existing last line by wrapping again
       let last = cur;
       const restWords = remaining.split(" ");
       for (const w of restWords) {
@@ -82,10 +77,8 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
     lines.push(cur);
   }
 
-  // If still somehow empty, fallback
   if (!lines.length) return t;
 
-  // ASS newline is \N
   return lines.join("\\N");
 }
 
@@ -202,7 +195,6 @@ app.post("/render", async (req, res) => {
     const assPath = path.join(workDir, "subs.ass");
     const outPath = path.join(workDir, "out.mp4");
 
-    // End card slogan audio
     const sloganMp3Path = path.join(workDir, "end_card_audio.mp3");
     const sloganWavPath = path.join(workDir, "end_card_audio.wav");
 
@@ -284,27 +276,46 @@ app.post("/render", async (req, res) => {
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
+    // If probe failed, use last caption end as “audio”
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // === SLIDES TIMING: image 1 lasts exactly segment 1; remaining split equally into 3 ===
-    const seg1Ms = scaledCaptions.length
-      ? Math.max(1, Math.round(Number(scaledCaptions[0].end_ms)))
-      : Math.floor(effectiveAudioMs / 4);
+    // =============================
+    // SLIDES TIMING (SEGMENT-DRIVEN)
+    // 7 segments:
+    // - img1 = seg1
+    // - img2 = seg2+seg3
+    // - img3 = seg4+seg5
+    // - img4 = seg6+seg7
+    // =============================
+    let seg1 = 0,
+      seg2 = 0,
+      seg3 = 0,
+      seg4 = 0;
 
-    const remaining = Math.max(0, effectiveAudioMs - seg1Ms);
-    const seg2Ms = Math.floor(remaining / 3);
-    const seg3Ms = Math.floor(remaining / 3);
-    const seg4Ms = Math.max(0, remaining - seg2Ms - seg3Ms);
+    if (scaledCaptions.length >= 7) {
+      const t1 = Math.round(Number(scaledCaptions[0].end_ms)); // end seg1
+      const t3 = Math.round(Number(scaledCaptions[2].end_ms)); // end seg3
+      const t5 = Math.round(Number(scaledCaptions[4].end_ms)); // end seg5
+      const t7 = Math.round(Number(scaledCaptions[6].end_ms)); // end seg7
 
-    const seg1 = seg1Ms;
-    const seg2 = seg2Ms;
-    const seg3 = seg3Ms;
-    const seg4 = seg4Ms;
-    // ============================================================================
+      seg1 = Math.max(1, t1);
+      seg2 = Math.max(1, t3 - t1);
+      seg3 = Math.max(1, t5 - t3);
+      seg4 = Math.max(1, t7 - t5);
+
+      effectiveAudioMs = Math.max(effectiveAudioMs, t7);
+    } else {
+      // Fallback: split into 4 equal parts if input is malformed
+      const part = Math.floor(effectiveAudioMs / 4);
+      seg1 = Math.max(1, part);
+      seg2 = Math.max(1, part);
+      seg3 = Math.max(1, part);
+      seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
+    }
 
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
@@ -312,19 +323,16 @@ app.post("/render", async (req, res) => {
 
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // =========================
-    // SUBTITLE STYLES (ASS)
-    // =========================
-    const titleFontSize = 150; // +50% from old
+    // SUBTITLES (ASS)
+    const titleFontSize = 150;
     const titleOutline = 5;
 
-    const captionFontSize = 100; // match old title look
+    const captionFontSize = 100;
     const captionOutline = 3;
 
-    const marginLR = Math.round(w * 0.10); // 10% left/right
-    const marginV = Math.round(h * 0.16); // bottom captions placement
-
-    const titleMarginV = Math.round(h * 0.34); // title placement
+    const marginLR = Math.round(w * 0.10);
+    const marginV = Math.round(h * 0.16);
+    const titleMarginV = Math.round(h * 0.34);
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -350,7 +358,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     function msToAssTime(ms) {
       const t = Math.max(0, Number(ms) || 0);
-      const cs = Math.floor(t / 10); // centiseconds
+      const cs = Math.floor(t / 10);
       const hh = Math.floor(cs / 360000);
       const mm = Math.floor((cs % 360000) / 6000);
       const ss = Math.floor((cs % 6000) / 100);
@@ -379,9 +387,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // -------------------------
-    // Build filter_complex
-    // -------------------------
+    // VIDEO FILTER
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
@@ -395,26 +401,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
       `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
 
-      // Burn-in ASS subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
       `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
-    // -------------------------
     // AUDIO
-    // - VO only during slideshow
-    // - silence during end card
-    // - slogan starts at end card + 0.2s
-    // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
     const sloganStartSec = endCardStartSec + 0.2;
     const sloganDelayMs = Math.max(0, Math.round(sloganStartSec * 1000));
 
-    // Main VO is input #5:a
     filterParts.push(
       `[5:a]asetpts=PTS-STARTPTS,` +
         `atrim=0:${endCardStartSec.toFixed(3)},` +
@@ -424,7 +423,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     );
 
     if (hasEndCardAudio) {
-      // Slogan is input #6:a (wav)
       const fadeIn = 0.12;
 
       filterParts.push(
