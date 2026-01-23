@@ -320,28 +320,29 @@ app.post("/render", async (req, res) => {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
-    // Crossfade config (keeps total slideshow length == seg1+seg2+seg3+seg4)
-    const fadeMs = 160;
+    // Faster crossfade + fewer heavy ops => faster render
+    const fadeMs = 100;
     const fadeSec = (fadeMs / 1000).toFixed(3);
 
+    // Extend first 3 sources by fade to allow overlap, keep total duration unchanged
     const seg1In = seg1 + fadeMs;
     const seg2In = seg2 + fadeMs;
     const seg3In = seg3 + fadeMs;
     const seg4In = seg4;
 
-    const frames1 = Math.max(1, Math.round((seg1In / 1000) * fps));
-    const frames2 = Math.max(1, Math.round((seg2In / 1000) * fps));
-    const frames3 = Math.max(1, Math.round((seg3In / 1000) * fps));
-    const frames4 = Math.max(1, Math.round((seg4In / 1000) * fps));
+    const seg1Sec = seg1 / 1000;
+    const seg2Sec = seg2 / 1000;
+    const seg3Sec = seg3 / 1000;
+    const seg4Sec = seg4 / 1000;
 
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // Offsets for crossfades (based on original segment boundaries)
-    const off1 = (seg1 / 1000).toFixed(3);
-    const off2 = ((seg1 + seg2) / 1000).toFixed(3);
-    const off3 = ((seg1 + seg2 + seg3) / 1000).toFixed(3);
+    // Offsets for xfade (use true boundaries)
+    const off1 = (seg1Sec).toFixed(3);
+    const off2 = (seg1Sec + seg2Sec).toFixed(3);
+    const off3 = (seg1Sec + seg2Sec + seg3Sec).toFixed(3);
 
     // =========================
     // SUBTITLE STYLES (ASS)
@@ -410,66 +411,59 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // ==========================================================
-    // FILTER COMPLEX
-    // - Ken Burns (zoom + micro-pan) per image
+    // FILTER COMPLEX (FAST VERSION)
+    // - Ken Burns via animated crop (faster than zoompan)
     // - Hook has stronger push-in
-    // - Crossfade between images (keeps total length unchanged)
-    // - Subtitles burned-in
-    // - Subtle grain + vignette ONLY on slideshow
-    // - End card remains static
+    // - Crossfade 0.10s
+    // - Subtle grain ONLY (no vignette) on slideshow
+    // - End card remains static (no grain)
     // ==========================================================
-    const srcW = Math.ceil(w * 1.25);
-    const srcH = Math.ceil(h * 1.25);
+    const baseScale = 1.18; // enough room for zoom + micro-pan, but lighter than 1.25
+    const baseW = Math.ceil(w * baseScale);
+    const baseH = Math.ceil(h * baseScale);
 
-    const coverToBig = `scale=${srcW}:${srcH}:force_original_aspect_ratio=increase,crop=${srcW}:${srcH},setsar=1,fps=${fps}`;
-
+    const coverToBase = `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase,crop=${baseW}:${baseH},setsar=1,fps=${fps}`;
     const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // zoom deltas (hook > others)
-    const hookZoomDelta = 0.08;  // 1.00 -> 1.08
-    const midZoomDelta  = 0.04;  // 1.00 -> 1.04
+    const hookZoomDelta = 0.08; // 1.00 -> 1.08 (push-in on hook)
+    const midZoomDelta = 0.04;  // 1.00 -> 1.04 (others calmer)
 
-    // micro pan strength (as fraction of available room)
-    // keep subtle: 0.06 = 6% of (iw-ow)
-    const p = (v) => v.toFixed(4);
+    // Helper to build a fast KenBurns-like chain using crop expressions
+    // Start crop bigger -> end crop exact w/h = zoom-in.
+    function kbChain(tagIn, tagOut, durSec, zoomDelta, panX, panY) {
+      // Crop size starts at (1+zoomDelta)*w/h and shrinks to w/h by end.
+      // Avoid division by 0 with max(durSec,0.001)
+      const D = Math.max(0.001, durSec);
+      const zW = `(${w}*(1+${zoomDelta}*(1-(t/${D}))))`;
+      const zH = `(${h}*(1+${zoomDelta}*(1-(t/${D}))))`;
+
+      // Pan offsets are fraction of available room
+      const x = `(iw-ow)/2 + (iw-ow)*${panX}*(t/${D})`;
+      const y = `(ih-oh)/2 + (ih-oh)*${panY}*(t/${D})`;
+
+      return `[${tagIn}]trim=duration=${durSec.toFixed(3)},setpts=PTS-STARTPTS,` +
+        `crop=w='${zW}':h='${zH}':x='${x}':y='${y}',` +
+        `scale=${w}:${h},format=yuv420p[${tagOut}]`;
+    }
 
     const filterParts = [
-      // Prep big covered sources
-      `[0:v]${coverToBig}[b0]`,
-      `[1:v]${coverToBig}[b1]`,
-      `[2:v]${coverToBig}[b2]`,
-      `[3:v]${coverToBig}[b3]`,
+      // prep base frames (do once per image)
+      `[0:v]${coverToBase}[b0]`,
+      `[1:v]${coverToBase}[b1]`,
+      `[2:v]${coverToBase}[b2]`,
+      `[3:v]${coverToBase}[b3]`,
 
-      // Ken Burns per image (different directions so it doesn't feel repetitive)
+      // Motion per image (FAST)
       // Hook: stronger push-in
-      `[b0]zoompan=` +
-        `z='1.0+${hookZoomDelta}*(on/${frames1})':` +
-        `x='(iw-ow)/2 + (iw-ow)*${p(0.05)}*(on/${frames1})':` +
-        `y='(ih-oh)/2 + (ih-oh)*${p(-0.02)}*(on/${frames1})':` +
-        `d=${frames1}:s=${w}x${h}:fps=${fps},format=yuv420p[s0]`,
+      kbChain("b0", "s0", (seg1In / 1000), hookZoomDelta, 0.05, -0.02),
+      // Image 2
+      kbChain("b1", "s1", (seg2In / 1000), midZoomDelta, -0.04, 0.03),
+      // Image 3
+      kbChain("b2", "s2", (seg3In / 1000), midZoomDelta, 0.03, -0.04),
+      // Image 4
+      kbChain("b3", "s3", (seg4In / 1000), midZoomDelta, -0.03, 0.02),
 
-      // Image 2: gentle drift opposite direction
-      `[b1]zoompan=` +
-        `z='1.0+${midZoomDelta}*(on/${frames2})':` +
-        `x='(iw-ow)/2 + (iw-ow)*${p(-0.04)}*(on/${frames2})':` +
-        `y='(ih-oh)/2 + (ih-oh)*${p(0.03)}*(on/${frames2})':` +
-        `d=${frames2}:s=${w}x${h}:fps=${fps},format=yuv420p[s1]`,
-
-      // Image 3: vertical emphasis
-      `[b2]zoompan=` +
-        `z='1.0+${midZoomDelta}*(on/${frames3})':` +
-        `x='(iw-ow)/2 + (iw-ow)*${p(0.03)}*(on/${frames3})':` +
-        `y='(ih-oh)/2 + (ih-oh)*${p(-0.04)}*(on/${frames3})':` +
-        `d=${frames3}:s=${w}x${h}:fps=${fps},format=yuv420p[s2]`,
-
-      // Image 4: gentle horizontal
-      `[b3]zoompan=` +
-        `z='1.0+${midZoomDelta}*(on/${frames4})':` +
-        `x='(iw-ow)/2 + (iw-ow)*${p(-0.03)}*(on/${frames4})':` +
-        `y='(ih-oh)/2 + (ih-oh)*${p(0.02)}*(on/${frames4})':` +
-        `d=${frames4}:s=${w}x${h}:fps=${fps},format=yuv420p[s3]`,
-
-      // Crossfades (total slideshow duration remains seg1+seg2+seg3+seg4)
+      // Crossfades (0.10s)
       `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
@@ -477,21 +471,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       // Burn-in subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      // Subtle grain + vignette ONLY on slideshow (end card stays clean)
-      `[subbed]noise=alls=2:allf=t,vignette=PI/7,format=yuv420p[styled]`,
+      // VERY subtle grain only (fast)
+      `[subbed]noise=alls=1:allf=t,format=yuv420p[styled]`,
 
-      // End card video (static)
+      // End card static (no grain)
       `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
 
-      // Concat slideshow + end card
+      // Concat slideshow + endcard
       `[styled][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
     // -------------------------
-    // AUDIO (same logic as before)
+    // AUDIO (same as before)
     // VO only during slideshow
-    // silence during end card
+    // end card silence
     // slogan starts at end card + 0.2s
     // -------------------------
     const endCardStartSec = slideshowMs / 1000;
@@ -526,10 +520,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const filter = filterParts.join(";");
 
-    // Note: we pass slightly longer durations for first 3 images to allow crossfade overlap
     const args = [
       "-y",
 
+      // 4 slideshow images (first 3 slightly longer for fades)
       "-loop",
       "1",
       "-t",
@@ -558,6 +552,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-i",
       img4Path,
 
+      // end card
       "-loop",
       "1",
       "-t",
@@ -565,6 +560,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-i",
       endPath,
 
+      // main voiceover
       "-i",
       audioPath
     ];
@@ -585,8 +581,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
+      // FAST ENCODE (biggest speed win)
       "-c:v",
       "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "23",
       "-pix_fmt",
       "yuv420p",
       "-profile:v",
