@@ -323,9 +323,33 @@ app.post("/render", async (req, res) => {
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+    // Base crop to cover the full canvas (no fps/format here; we handle fps inside zoompan)
+    const coverBase = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1`;
 
-    // SUBTITLES (ASS)
+    // End card can remain static
+    const coverCropEnd = `${coverBase},fps=${fps},format=yuv420p`;
+
+    // =============================
+    // KEN BURNS (ZOOM ONLY, CENTERED)
+    // =============================
+    const zoomEnd = 1.08; // subtle zoom in (1.05–1.10 is typical)
+
+    const seg1Frames = Math.max(2, Math.round((seg1 / 1000) * fps));
+    const seg2Frames = Math.max(2, Math.round((seg2 / 1000) * fps));
+    const seg3Frames = Math.max(2, Math.round((seg3 / 1000) * fps));
+    const seg4Frames = Math.max(2, Math.round((seg4 / 1000) * fps));
+
+    function zoomExprFor(frames) {
+      const zEnd = Number(zoomEnd);
+      const dz = Number((zEnd - 1).toFixed(4));
+      const denom = Math.max(1, frames - 1);
+      // Smooth linear zoom 1.00 -> zoomEnd across frames; clamp at zoomEnd
+      return `min(${zEnd.toFixed(3)},1+${dz.toFixed(4)}*on/${denom})`;
+    }
+
+    const zoomXY = `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
+
+    // SUBTITLES (ASS) — centered in the middle of the screen (as per your last request)
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -334,13 +358,9 @@ app.post("/render", async (req, res) => {
 
     const marginLR = Math.round(w * 0.10);
 
-    // >>> CHANGE: center ALL subtitles in the middle of the screen
-    // ASS Alignment:
-    // 5 = middle-center
-    // For center positioning, MarginV isn't needed, so we set it to 0.
+    // center all subtitles
     const marginV = 0;
     const titleMarginV = 0;
-    // <<< END CHANGE
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -397,16 +417,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     // VIDEO FILTER
     const filterParts = [
-      `[0:v]${coverCrop}[v0]`,
-      `[1:v]${coverCrop}[v1]`,
-      `[2:v]${coverCrop}[v2]`,
-      `[3:v]${coverCrop}[v3]`,
-      `[4:v]${coverCrop}[v4]`,
+      // Ken Burns (zoom only) on the 4 slideshow images
+      `[0:v]${coverBase},zoompan=z='${zoomExprFor(seg1Frames)}':${zoomXY}:d=${seg1Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s0]`,
+      `[1:v]${coverBase},zoompan=z='${zoomExprFor(seg2Frames)}':${zoomXY}:d=${seg2Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s1]`,
+      `[2:v]${coverBase},zoompan=z='${zoomExprFor(seg3Frames)}':${zoomXY}:d=${seg3Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s2]`,
+      `[3:v]${coverBase},zoompan=z='${zoomExprFor(seg4Frames)}':${zoomXY}:d=${seg4Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s3]`,
 
-      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
-      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
-      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
-      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
+      // End card (static)
+      `[4:v]${coverCropEnd}[v4]`,
+
       `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
