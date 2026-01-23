@@ -62,9 +62,7 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (cur && lines.length < maxLines) {
-    const usedWords =
-      lines.join(" ").split(" ").filter(Boolean).length +
-      cur.split(" ").filter(Boolean).length;
+    const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
       let last = cur;
@@ -323,33 +321,9 @@ app.post("/render", async (req, res) => {
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // Base crop to cover the full canvas (no fps/format here; we handle fps inside zoompan)
-    const coverBase = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1`;
+    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // End card can remain static
-    const coverCropEnd = `${coverBase},fps=${fps},format=yuv420p`;
-
-    // =============================
-    // KEN BURNS (ZOOM ONLY, CENTERED)
-    // =============================
-    const zoomEnd = 1.08; // subtle zoom in (1.05–1.10 is typical)
-
-    const seg1Frames = Math.max(2, Math.round((seg1 / 1000) * fps));
-    const seg2Frames = Math.max(2, Math.round((seg2 / 1000) * fps));
-    const seg3Frames = Math.max(2, Math.round((seg3 / 1000) * fps));
-    const seg4Frames = Math.max(2, Math.round((seg4 / 1000) * fps));
-
-    function zoomExprFor(frames) {
-      const zEnd = Number(zoomEnd);
-      const dz = Number((zEnd - 1).toFixed(4));
-      const denom = Math.max(1, frames - 1);
-      // Smooth linear zoom 1.00 -> zoomEnd across frames; clamp at zoomEnd
-      return `min(${zEnd.toFixed(3)},1+${dz.toFixed(4)}*on/${denom})`;
-    }
-
-    const zoomXY = `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
-
-    // SUBTITLES (ASS) — centered in the middle of the screen (as per your last request)
+    // SUBTITLES (ASS)
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -358,9 +332,17 @@ app.post("/render", async (req, res) => {
 
     const marginLR = Math.round(w * 0.10);
 
-    // center all subtitles
+    // Center all subtitles on screen
     const marginV = 0;
     const titleMarginV = 0;
+
+    // Slide-in params (B)
+    const capX = Math.round(w / 2);
+    const capY = Math.round(h / 2);
+    const slideDy = Math.max(20, Math.round(h * 0.035)); // ~3.5% of height
+    const slideInMs = 220;
+    const fadeInMs = 120;
+    const fadeOutMs = 120;
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -395,6 +377,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
     }
 
+    // Slide-in override (from slightly below -> center), plus fade
+    // \move(x1,y1,x2,y2,t1,t2) is in ms relative to line start
+    const slideTag = `{\\move(${capX},${capY + slideDy},${capX},${capY},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
+
     let ass = header;
 
     for (let i = 0; i < scaledCaptions.length; i++) {
@@ -405,28 +391,38 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       if (i === 0) {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
-        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${slideTag}${wrapped}\n`;
       } else {
         const raw = assEscape(c.text);
         const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
-        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${wrapped}\n`;
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${slideTag}${wrapped}\n`;
       }
     }
 
     fs.writeFileSync(assPath, ass, "utf8");
 
     // VIDEO FILTER
+    const xfadeDur = 0.30;
+    const off1 = Math.max(0.001, seg1 / 1000 - xfadeDur);
+    const off2 = Math.max(0.001, (seg1 + seg2) / 1000 - 2 * xfadeDur);
+    const off3 = Math.max(0.001, (seg1 + seg2 + seg3) / 1000 - 3 * xfadeDur);
+
     const filterParts = [
-      // Ken Burns (zoom only) on the 4 slideshow images
-      `[0:v]${coverBase},zoompan=z='${zoomExprFor(seg1Frames)}':${zoomXY}:d=${seg1Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s0]`,
-      `[1:v]${coverBase},zoompan=z='${zoomExprFor(seg2Frames)}':${zoomXY}:d=${seg2Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s1]`,
-      `[2:v]${coverBase},zoompan=z='${zoomExprFor(seg3Frames)}':${zoomXY}:d=${seg3Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s2]`,
-      `[3:v]${coverBase},zoompan=z='${zoomExprFor(seg4Frames)}':${zoomXY}:d=${seg4Frames}:s=${w}x${h}:fps=${fps},trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p[s3]`,
+      `[0:v]${coverCrop}[v0]`,
+      `[1:v]${coverCrop}[v1]`,
+      `[2:v]${coverCrop}[v2]`,
+      `[3:v]${coverCrop}[v3]`,
+      `[4:v]${coverCrop}[v4]`,
 
-      // End card (static)
-      `[4:v]${coverCropEnd}[v4]`,
+      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
+      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
+      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
+      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
 
-      `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
+      // Classic dissolve crossfades between slides (fade)
+      `[s0][s1]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off1.toFixed(3)}[x01]`,
+      `[x01][s2]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off2.toFixed(3)}[x012]`,
+      `[x012][s3]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off3.toFixed(3)}[slideshow]`,
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
