@@ -403,14 +403,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     // ==========================================================
     // VIDEO MOTION (FFmpeg 5.1 compatible)
     // Use zoompan (Ken Burns) instead of crop eval.
-    // Hook = stronger push-in, others subtle.
+    // Movement increased (hook most, others moderate).
     // ==========================================================
-    const baseScale = 1.22; // little extra buffer for pan/zoom
-    const baseW = Math.ceil(w * baseScale);
-    const baseH = Math.ceil(h * baseScale);
+    const baseScale = 1.32; // increased buffer for stronger zoom/pan
+    const baseW = Math.ceil((w * baseScale) / 2) * 2; // keep even dims
+    const baseH = Math.ceil((h * baseScale) / 2) * 2; // keep even dims
 
-    const hookZoomDelta = 0.08;
-    const midZoomDelta = 0.04;
+    const hookZoomDelta = 0.14; // was 0.08
+    const midZoomDelta = 0.08; // was 0.04
 
     function zoompanChain(tagIn, tagOut, durMs, zoomDelta, panX, panY) {
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
@@ -433,17 +433,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const filterParts = [
-      zoompanChain("0:v", "s0", seg1In, hookZoomDelta, 0.05, -0.02),
-      zoompanChain("1:v", "s1", seg2In, midZoomDelta, -0.04, 0.03),
-      zoompanChain("2:v", "s2", seg3In, midZoomDelta, 0.03, -0.04),
-      zoompanChain("3:v", "s3", seg4In, midZoomDelta, -0.03, 0.02),
+      // Hook: strongest, noticeable push-in + gentle drift
+      zoompanChain("0:v", "s0", seg1In, hookZoomDelta, 0.09, -0.05),
+
+      // Mid images: moderate motion, different directions
+      zoompanChain("1:v", "s1", seg2In, midZoomDelta, -0.07, 0.06),
+      zoompanChain("2:v", "s2", seg3In, midZoomDelta, 0.06, -0.07),
+      zoompanChain("3:v", "s3", seg4In, midZoomDelta, -0.06, 0.05),
 
       `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
-      `[subbed]noise=alls=1:allf=t,format=yuv420p[styled]`,
+
+      // NOISE FIX A: remove temporal grain completely
+      `[subbed]format=yuv420p[styled]`,
 
       `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
