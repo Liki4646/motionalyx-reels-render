@@ -407,10 +407,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     // ==========================================================
     // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
     //
-    // FIXES for "tremble"/micro-jitter:
-    // 1) Base scaling aligned to 16px (less rounding artifacts)
-    // 2) x/y CENTER locked with floor(...) (stable integer crop window)
-    // 3) Removed trim=duration=... after zoompan (avoid time-based frame dup/drop)
+    // Speed optimizations:
+    // - scale flags: fast_bilinear (much faster than lanczos)
+    // - keep jitter fixes (floor center + no trim)
     // ==========================================================
     const baseScale = 1.32;
 
@@ -424,23 +423,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
       const denom = Math.max(1, frames - 1);
 
-      // Start slightly zoomed in, then push in more (smooth).
       const z = `1+(${zoomDelta})*(on/${denom})`;
 
-      // Center locked to true center with integer stability (prevents left/right micro-jitter)
       const x = `floor(iw/2-(iw/(2*zoom)))`;
       const y = `floor(ih/2-(ih/(2*zoom)))`;
 
       return (
         `[${tagIn}]` +
-        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=lanczos,setsar=1,` +
+        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=fast_bilinear,setsar=1,` +
         `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
         `setpts=PTS-STARTPTS,format=yuv420p` +
         `[${tagOut}]`
       );
     }
 
-    const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+    const endCover =
+      `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=fast_bilinear,` +
+      `crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     const filterParts = [
       zoompanOnlyZoom("0:v", "s0", seg1In, hookZoomDelta),
@@ -452,10 +451,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
-      `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
-
-      // NOISE FIX A: no temporal grain
-      `[subbed]format=yuv420p[styled]`,
+      `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[styled]`,
 
       `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
@@ -494,6 +490,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const args = [
       "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-threads",
+      "0",
 
       "-loop",
       "1",
@@ -575,9 +576,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     console.log("[render] ffmpeg args:", args.join(" "));
     await execFileAsync("ffmpeg", args);
 
-    const mp4 = fs.readFileSync(outPath);
+    // Stream output (faster + no huge memory buffer)
     res.setHeader("Content-Type", "video/mp4");
-    res.status(200).send(mp4);
+    const rs = fs.createReadStream(outPath);
+    rs.on("error", (e) => {
+      try {
+        res.status(500).json({ ok: false, error: String(e?.message || e) });
+      } catch (_e2) {}
+    });
+    rs.pipe(res);
   } catch (err) {
     res.status(400).json({ ok: false, error: String(err?.message || err) });
   }
