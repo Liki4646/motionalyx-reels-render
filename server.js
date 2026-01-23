@@ -80,7 +80,6 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (!lines.length) return t;
-
   return lines.join("\\N");
 }
 
@@ -92,8 +91,7 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     const start = Number(c?.start_ms);
     const end = Number(c?.end_ms);
     const txt = String(c?.text || "").trim();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt)
-      continue;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
     items.push({ dur_ms: end - start, text: txt });
   }
   if (items.length === 0) return [];
@@ -281,9 +279,7 @@ app.post("/render", async (req, res) => {
 
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
-      const lastEnd = scaledCaptions.length
-        ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms)
-        : 0;
+      const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
@@ -301,10 +297,10 @@ app.post("/render", async (req, res) => {
       seg4 = 0;
 
     if (scaledCaptions.length >= 7) {
-      const t1 = Math.round(Number(scaledCaptions[0].end_ms)); // end seg1
-      const t3 = Math.round(Number(scaledCaptions[2].end_ms)); // end seg3
-      const t5 = Math.round(Number(scaledCaptions[4].end_ms)); // end seg5
-      const t7 = Math.round(Number(scaledCaptions[6].end_ms)); // end seg7
+      const t1 = Math.round(Number(scaledCaptions[0].end_ms));
+      const t3 = Math.round(Number(scaledCaptions[2].end_ms));
+      const t5 = Math.round(Number(scaledCaptions[4].end_ms));
+      const t7 = Math.round(Number(scaledCaptions[6].end_ms));
 
       seg1 = Math.max(1, t1);
       seg2 = Math.max(1, t3 - t1);
@@ -320,11 +316,11 @@ app.post("/render", async (req, res) => {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
-    // Faster crossfade + fewer heavy ops => faster render
+    // Faster crossfade
     const fadeMs = 100;
     const fadeSec = (fadeMs / 1000).toFixed(3);
 
-    // Extend first 3 sources by fade to allow overlap, keep total duration unchanged
+    // Extend first 3 sources by fade to allow overlap
     const seg1In = seg1 + fadeMs;
     const seg2In = seg2 + fadeMs;
     const seg3In = seg3 + fadeMs;
@@ -333,16 +329,15 @@ app.post("/render", async (req, res) => {
     const seg1Sec = seg1 / 1000;
     const seg2Sec = seg2 / 1000;
     const seg3Sec = seg3 / 1000;
-    const seg4Sec = seg4 / 1000;
 
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // Offsets for xfade (use true boundaries)
-    const off1 = (seg1Sec).toFixed(3);
-    const off2 = (seg1Sec + seg2Sec).toFixed(3);
-    const off3 = (seg1Sec + seg2Sec + seg3Sec).toFixed(3);
+    // xfade offsets based on true boundaries (not segIn)
+    const off1 = (seg1Sec - fadeMs / 1000).toFixed(3);
+    const off2 = (seg1Sec + seg2Sec - fadeMs / 1000).toFixed(3);
+    const off3 = (seg1Sec + seg2Sec + seg3Sec - fadeMs / 1000).toFixed(3);
 
     // =========================
     // SUBTITLE STYLES (ASS)
@@ -411,82 +406,69 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // ==========================================================
-    // FILTER COMPLEX (FAST VERSION)
-    // - Ken Burns via animated crop (faster than zoompan)
+    // FILTER COMPLEX (FAST + FIXED crop eval)
+    // - Ken Burns via animated crop (eval=frame) + safe integer/even + clamp
     // - Hook has stronger push-in
     // - Crossfade 0.10s
-    // - Subtle grain ONLY (no vignette) on slideshow
-    // - End card remains static (no grain)
+    // - Subtle grain only on slideshow
+    // - End card static
     // ==========================================================
-    const baseScale = 1.18; // enough room for zoom + micro-pan, but lighter than 1.25
+    const baseScale = 1.18;
     const baseW = Math.ceil(w * baseScale);
     const baseH = Math.ceil(h * baseScale);
 
     const coverToBase = `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase,crop=${baseW}:${baseH},setsar=1,fps=${fps}`;
     const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    const hookZoomDelta = 0.08; // 1.00 -> 1.08 (push-in on hook)
-    const midZoomDelta = 0.04;  // 1.00 -> 1.04 (others calmer)
+    const hookZoomDelta = 0.08;
+    const midZoomDelta = 0.04;
 
-    // Helper to build a fast KenBurns-like chain using crop expressions
-    // Start crop bigger -> end crop exact w/h = zoom-in.
     function kbChain(tagIn, tagOut, durSec, zoomDelta, panX, panY) {
-      // Crop size starts at (1+zoomDelta)*w/h and shrinks to w/h by end.
-      // Avoid division by 0 with max(durSec,0.001)
       const D = Math.max(0.001, durSec);
-      const zW = `(${w}*(1+${zoomDelta}*(1-(t/${D}))))`;
-      const zH = `(${h}*(1+${zoomDelta}*(1-(t/${D}))))`;
 
-      // Pan offsets are fraction of available room
-      const x = `(iw-ow)/2 + (iw-ow)*${panX}*(t/${D})`;
-      const y = `(ih-oh)/2 + (ih-oh)*${panY}*(t/${D})`;
+      // Make crop sizes integer + even (yuv420p friendly)
+      const wRaw = `${w}*(1+${zoomDelta}*(1-(t/${D})))`;
+      const hRaw = `${h}*(1+${zoomDelta}*(1-(t/${D})))`;
+      const wEven = `max(${w}, floor((${wRaw})/2)*2)`;
+      const hEven = `max(${h}, floor((${hRaw})/2)*2)`;
+
+      // Clamp x/y to valid range
+      const xBase = `(iw-ow)/2 + (iw-ow)*${panX}*(t/${D})`;
+      const yBase = `(ih-oh)/2 + (ih-oh)*${panY}*(t/${D})`;
+      const xClamp = `max(0, min(iw-ow, ${xBase}))`;
+      const yClamp = `max(0, min(ih-oh, ${yBase}))`;
 
       return `[${tagIn}]trim=duration=${durSec.toFixed(3)},setpts=PTS-STARTPTS,` +
-        `crop=w='${zW}':h='${zH}':x='${x}':y='${y}',` +
+        `crop=w='${wEven}':h='${hEven}':x='${xClamp}':y='${yClamp}':eval=frame,` +
         `scale=${w}:${h},format=yuv420p[${tagOut}]`;
     }
 
     const filterParts = [
-      // prep base frames (do once per image)
       `[0:v]${coverToBase}[b0]`,
       `[1:v]${coverToBase}[b1]`,
       `[2:v]${coverToBase}[b2]`,
       `[3:v]${coverToBase}[b3]`,
 
-      // Motion per image (FAST)
-      // Hook: stronger push-in
-      kbChain("b0", "s0", (seg1In / 1000), hookZoomDelta, 0.05, -0.02),
-      // Image 2
-      kbChain("b1", "s1", (seg2In / 1000), midZoomDelta, -0.04, 0.03),
-      // Image 3
-      kbChain("b2", "s2", (seg3In / 1000), midZoomDelta, 0.03, -0.04),
-      // Image 4
-      kbChain("b3", "s3", (seg4In / 1000), midZoomDelta, -0.03, 0.02),
+      kbChain("b0", "s0", seg1In / 1000, hookZoomDelta, 0.05, -0.02),
+      kbChain("b1", "s1", seg2In / 1000, midZoomDelta, -0.04, 0.03),
+      kbChain("b2", "s2", seg3In / 1000, midZoomDelta, 0.03, -0.04),
+      kbChain("b3", "s3", seg4In / 1000, midZoomDelta, -0.03, 0.02),
 
-      // Crossfades (0.10s)
       `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
       `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
 
-      // Burn-in subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
-
-      // VERY subtle grain only (fast)
       `[subbed]noise=alls=1:allf=t,format=yuv420p[styled]`,
 
-      // End card static (no grain)
       `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
 
-      // Concat slideshow + endcard
       `[styled][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
     // -------------------------
-    // AUDIO (same as before)
-    // VO only during slideshow
-    // end card silence
-    // slogan starts at end card + 0.2s
+    // AUDIO
     // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
@@ -498,19 +480,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[5:a]asetpts=PTS-STARTPTS,` +
         `atrim=0:${endCardStartSec.toFixed(3)},` +
         `apad=pad_dur=${(endCardDurMs / 1000 + 2).toFixed(3)},` +
-        `atrim=0:${totalDurSec.toFixed(3)}` +
-        `[amain]`
+        `atrim=0:${totalDurSec.toFixed(3)}[amain]`
     );
 
     if (hasEndCardAudio) {
       const fadeIn = 0.12;
-
       filterParts.push(
-        `[6:a]asetpts=PTS-STARTPTS,` +
-          `afade=t=in:st=0:d=${fadeIn},` +
-          `volume=1.35,` +
-          `adelay=${sloganDelayMs}|${sloganDelayMs}` +
-          `[aslogan]`,
+        `[6:a]asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeIn},volume=1.35,adelay=${sloganDelayMs}|${sloganDelayMs}[aslogan]`,
         `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
         `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
       );
@@ -523,7 +499,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const args = [
       "-y",
 
-      // 4 slideshow images (first 3 slightly longer for fades)
       "-loop",
       "1",
       "-t",
@@ -552,7 +527,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-i",
       img4Path,
 
-      // end card
       "-loop",
       "1",
       "-t",
@@ -560,7 +534,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-i",
       endPath,
 
-      // main voiceover
       "-i",
       audioPath
     ];
@@ -581,7 +554,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
-      // FAST ENCODE (biggest speed win)
+      // FAST encode
       "-c:v",
       "libx264",
       "-preset",
@@ -604,7 +577,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     );
 
     console.log("[render] ffmpeg args:", args.join(" "));
-
     await execFileAsync("ffmpeg", args);
 
     const mp4 = fs.readFileSync(outPath);
