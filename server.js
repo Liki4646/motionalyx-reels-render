@@ -62,7 +62,9 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (cur && lines.length < maxLines) {
-    const usedWords = lines.join(" ").split(" ").filter(Boolean).length + cur.split(" ").filter(Boolean).length;
+    const usedWords =
+      lines.join(" ").split(" ").filter(Boolean).length +
+      cur.split(" ").filter(Boolean).length;
     const remaining = words.slice(usedWords).join(" ").trim();
     if (remaining) {
       let last = cur;
@@ -90,7 +92,8 @@ function normalizeAndScaleCaptions(captions, audioMs) {
     const start = Number(c?.start_ms);
     const end = Number(c?.end_ms);
     const txt = String(c?.text || "").trim();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt) continue;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !txt)
+      continue;
     items.push({ dur_ms: end - start, text: txt });
   }
   if (items.length === 0) return [];
@@ -276,10 +279,11 @@ app.post("/render", async (req, res) => {
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
-    // If probe failed, use last caption end as “audio”
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
-      const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
+      const lastEnd = scaledCaptions.length
+        ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms)
+        : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
@@ -309,7 +313,6 @@ app.post("/render", async (req, res) => {
 
       effectiveAudioMs = Math.max(effectiveAudioMs, t7);
     } else {
-      // Fallback: split into 4 equal parts if input is malformed
       const part = Math.floor(effectiveAudioMs / 4);
       seg1 = Math.max(1, part);
       seg2 = Math.max(1, part);
@@ -317,13 +320,32 @@ app.post("/render", async (req, res) => {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
+    // Crossfade config (keeps total slideshow length == seg1+seg2+seg3+seg4)
+    const fadeMs = 160;
+    const fadeSec = (fadeMs / 1000).toFixed(3);
+
+    const seg1In = seg1 + fadeMs;
+    const seg2In = seg2 + fadeMs;
+    const seg3In = seg3 + fadeMs;
+    const seg4In = seg4;
+
+    const frames1 = Math.max(1, Math.round((seg1In / 1000) * fps));
+    const frames2 = Math.max(1, Math.round((seg2In / 1000) * fps));
+    const frames3 = Math.max(1, Math.round((seg3In / 1000) * fps));
+    const frames4 = Math.max(1, Math.round((seg4In / 1000) * fps));
+
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+    // Offsets for crossfades (based on original segment boundaries)
+    const off1 = (seg1 / 1000).toFixed(3);
+    const off2 = ((seg1 + seg2) / 1000).toFixed(3);
+    const off3 = ((seg1 + seg2 + seg3) / 1000).toFixed(3);
 
-    // SUBTITLES (ASS)
+    // =========================
+    // SUBTITLE STYLES (ASS)
+    // =========================
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -387,27 +409,91 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO FILTER
+    // ==========================================================
+    // FILTER COMPLEX
+    // - Ken Burns (zoom + micro-pan) per image
+    // - Hook has stronger push-in
+    // - Crossfade between images (keeps total length unchanged)
+    // - Subtitles burned-in
+    // - Subtle grain + vignette ONLY on slideshow
+    // - End card remains static
+    // ==========================================================
+    const srcW = Math.ceil(w * 1.25);
+    const srcH = Math.ceil(h * 1.25);
+
+    const coverToBig = `scale=${srcW}:${srcH}:force_original_aspect_ratio=increase,crop=${srcW}:${srcH},setsar=1,fps=${fps}`;
+
+    const endCover = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
+
+    // zoom deltas (hook > others)
+    const hookZoomDelta = 0.08;  // 1.00 -> 1.08
+    const midZoomDelta  = 0.04;  // 1.00 -> 1.04
+
+    // micro pan strength (as fraction of available room)
+    // keep subtle: 0.06 = 6% of (iw-ow)
+    const p = (v) => v.toFixed(4);
+
     const filterParts = [
-      `[0:v]${coverCrop}[v0]`,
-      `[1:v]${coverCrop}[v1]`,
-      `[2:v]${coverCrop}[v2]`,
-      `[3:v]${coverCrop}[v3]`,
-      `[4:v]${coverCrop}[v4]`,
+      // Prep big covered sources
+      `[0:v]${coverToBig}[b0]`,
+      `[1:v]${coverToBig}[b1]`,
+      `[2:v]${coverToBig}[b2]`,
+      `[3:v]${coverToBig}[b3]`,
 
-      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
-      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
-      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
-      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
-      `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
+      // Ken Burns per image (different directions so it doesn't feel repetitive)
+      // Hook: stronger push-in
+      `[b0]zoompan=` +
+        `z='1.0+${hookZoomDelta}*(on/${frames1})':` +
+        `x='(iw-ow)/2 + (iw-ow)*${p(0.05)}*(on/${frames1})':` +
+        `y='(ih-oh)/2 + (ih-oh)*${p(-0.02)}*(on/${frames1})':` +
+        `d=${frames1}:s=${w}x${h}:fps=${fps},format=yuv420p[s0]`,
 
+      // Image 2: gentle drift opposite direction
+      `[b1]zoompan=` +
+        `z='1.0+${midZoomDelta}*(on/${frames2})':` +
+        `x='(iw-ow)/2 + (iw-ow)*${p(-0.04)}*(on/${frames2})':` +
+        `y='(ih-oh)/2 + (ih-oh)*${p(0.03)}*(on/${frames2})':` +
+        `d=${frames2}:s=${w}x${h}:fps=${fps},format=yuv420p[s1]`,
+
+      // Image 3: vertical emphasis
+      `[b2]zoompan=` +
+        `z='1.0+${midZoomDelta}*(on/${frames3})':` +
+        `x='(iw-ow)/2 + (iw-ow)*${p(0.03)}*(on/${frames3})':` +
+        `y='(ih-oh)/2 + (ih-oh)*${p(-0.04)}*(on/${frames3})':` +
+        `d=${frames3}:s=${w}x${h}:fps=${fps},format=yuv420p[s2]`,
+
+      // Image 4: gentle horizontal
+      `[b3]zoompan=` +
+        `z='1.0+${midZoomDelta}*(on/${frames4})':` +
+        `x='(iw-ow)/2 + (iw-ow)*${p(-0.03)}*(on/${frames4})':` +
+        `y='(ih-oh)/2 + (ih-oh)*${p(0.02)}*(on/${frames4})':` +
+        `d=${frames4}:s=${w}x${h}:fps=${fps},format=yuv420p[s3]`,
+
+      // Crossfades (total slideshow duration remains seg1+seg2+seg3+seg4)
+      `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
+      `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
+      `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
+
+      // Burn-in subtitles
       `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
+      // Subtle grain + vignette ONLY on slideshow (end card stays clean)
+      `[subbed]noise=alls=2:allf=t,vignette=PI/7,format=yuv420p[styled]`,
+
+      // End card video (static)
+      `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
-      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
+
+      // Concat slideshow + end card
+      `[styled][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
-    // AUDIO
+    // -------------------------
+    // AUDIO (same logic as before)
+    // VO only during slideshow
+    // silence during end card
+    // slogan starts at end card + 0.2s
+    // -------------------------
     const endCardStartSec = slideshowMs / 1000;
     const totalDurSec = totalMs / 1000;
 
@@ -440,34 +526,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const filter = filterParts.join(";");
 
+    // Note: we pass slightly longer durations for first 3 images to allow crossfade overlap
     const args = [
       "-y",
 
       "-loop",
       "1",
       "-t",
-      (seg1 / 1000).toFixed(3),
+      (seg1In / 1000).toFixed(3),
       "-i",
       img1Path,
 
       "-loop",
       "1",
       "-t",
-      (seg2 / 1000).toFixed(3),
+      (seg2In / 1000).toFixed(3),
       "-i",
       img2Path,
 
       "-loop",
       "1",
       "-t",
-      (seg3 / 1000).toFixed(3),
+      (seg3In / 1000).toFixed(3),
       "-i",
       img3Path,
 
       "-loop",
       "1",
       "-t",
-      (seg4 / 1000).toFixed(3),
+      (seg4In / 1000).toFixed(3),
       "-i",
       img4Path,
 
