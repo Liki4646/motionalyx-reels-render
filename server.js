@@ -344,8 +344,13 @@ app.post("/render", async (req, res) => {
     const captionOutline = 3;
 
     const marginLR = Math.round(w * 0.10);
-    const marginV = Math.round(h * 0.16);
+
+    // Title stays where it was (this matches your first segment)
     const titleMarginV = Math.round(h * 0.34);
+
+    // FIX: Captions centered like title, but nudged DOWN so they start lower (as in your screenshot request)
+    // Move down by ~1.25x caption font size (≈ one line), keeping segment font sizes unchanged.
+    const captionMarginV = Math.min(h - 10, titleMarginV + Math.round(captionFontSize * 1.25));
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -363,8 +368,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
-// CHANGE: Caption now uses the same centered placement as Title (Alignment=8 + MarginV=titleMarginV)
-Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,8,${marginLR},${marginLR},${captionMarginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
