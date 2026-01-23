@@ -348,8 +348,7 @@ app.post("/render", async (req, res) => {
     // Title stays where it was (this matches your first segment)
     const titleMarginV = Math.round(h * 0.34);
 
-    // FIX: Captions centered like title, but nudged DOWN so they start lower (as in your screenshot request)
-    // Move down by ~1.25x caption font size (≈ one line), keeping segment font sizes unchanged.
+    // Captions centered like title, but nudged DOWN
     const captionMarginV = Math.min(h - 10, titleMarginV + Math.round(captionFontSize * 1.25));
 
     const titleMaxCharsPerLine = 12;
@@ -407,8 +406,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     // ==========================================================
     // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
-    // Use zoompan with centered x/y at all times.
-    // Hook zoom stronger, others more subtle. End card static.
+    // FIX: zoom must stay locked to TRUE CENTER while zoom changes
     // ==========================================================
     const baseScale = 1.32;
     const baseW = Math.ceil((w * baseScale) / 2) * 2;
@@ -424,9 +422,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       // Start slightly zoomed in, then push in more (smooth).
       const z = `1+(${zoomDelta})*(on/${denom})`;
 
-      // NO DRIFT: always centered
-      const x = `(iw-ow)/2`;
-      const y = `(ih-oh)/2`;
+      // FIX: center should be computed based on current zoom (not output size),
+      // so it never "slides" sideways while zooming.
+      const x = `iw/2-(iw/zoom/2)`;
+      const y = `ih/2-(ih/zoom/2)`;
 
       return (
         `[${tagIn}]` +
