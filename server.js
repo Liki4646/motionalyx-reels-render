@@ -5,7 +5,6 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import tmp from "tmp";
-import crypto from "crypto";
 
 const execFileAsync = promisify(execFile);
 tmp.setGracefulCleanup();
@@ -16,111 +15,6 @@ app.use(express.json({ limit: "50mb" }));
 app.get("/", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
-// =====================
-// CONFIG (REQUIRED)
-// =====================
-// Make a GCS bucket and set it to public-read OR handle access in your own way.
-// Then set env var OUTPUT_BUCKET to that bucket name.
-const OUTPUT_BUCKET = process.env.OUTPUT_BUCKET || ""; // e.g. "motionalyx-renders"
-const OUTPUT_PREFIX = process.env.OUTPUT_PREFIX || "renders"; // folder prefix in bucket
-
-function mustHaveBucket() {
-  if (!OUTPUT_BUCKET) throw new Error("Missing env var OUTPUT_BUCKET (GCS bucket name).");
-}
-
-function publicGcsUrl(bucket, objectName) {
-  // Works if bucket/object is publicly readable
-  return `https://storage.googleapis.com/${bucket}/${encodeURIComponent(objectName).replace(/%2F/g, "/")}`;
-}
-
-// =====================
-// GCS helpers (no extra deps)
-// Uses Cloud Run metadata server to get an access token,
-// then uses GCS JSON API.
-// =====================
-async function getAccessToken() {
-  const r = await fetch(
-    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
-    { headers: { "Metadata-Flavor": "Google" } }
-  );
-  if (!r.ok) throw new Error(`metadata token failed: ${r.status}`);
-  const j = await r.json();
-  if (!j?.access_token) throw new Error("metadata token missing access_token");
-  return j.access_token;
-}
-
-async function gcsUploadFile({ bucket, objectName, filePath, contentType }) {
-  const token = await getAccessToken();
-  const url =
-    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o` +
-    `?uploadType=media&name=${encodeURIComponent(objectName)}`;
-
-  const stat = fs.statSync(filePath);
-  const stream = fs.createReadStream(filePath);
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": contentType || "application/octet-stream",
-      "Content-Length": String(stat.size)
-    },
-    body: stream
-  });
-
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`gcs upload failed ${r.status}: ${txt}`);
-  }
-  return await r.json().catch(() => ({}));
-}
-
-async function gcsUploadJson({ bucket, objectName, json }) {
-  const token = await getAccessToken();
-  const url =
-    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o` +
-    `?uploadType=media&name=${encodeURIComponent(objectName)}`;
-
-  const body = Buffer.from(JSON.stringify(json), "utf8");
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json; charset=utf-8",
-      "Content-Length": String(body.length)
-    },
-    body
-  });
-
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`gcs upload json failed ${r.status}: ${txt}`);
-  }
-  return await r.json().catch(() => ({}));
-}
-
-async function gcsReadJson({ bucket, objectName }) {
-  const token = await getAccessToken();
-  const url =
-    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/` +
-    `${encodeURIComponent(objectName)}?alt=media`;
-
-  const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-
-  if (r.status === 404) return null;
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`gcs read json failed ${r.status}: ${txt}`);
-  }
-  return await r.json();
-}
-
-// =====================
-// Your existing helpers
-// =====================
 async function downloadToFile(url, outPath) {
   const r = await fetch(url, {
     redirect: "follow",
@@ -186,6 +80,7 @@ function wrapByChars(text, maxCharsPerLine, maxLines) {
   }
 
   if (!lines.length) return t;
+
   return lines.join("\\N");
 }
 
@@ -272,39 +167,6 @@ function normalizeAndScaleCaptions(captions, audioMs) {
   return out;
 }
 
-function msToAssTime(ms) {
-  const t = Math.max(0, Number(ms) || 0);
-  const cs = Math.floor(t / 10);
-  const hh = Math.floor(cs / 360000);
-  const mm = Math.floor((cs % 360000) / 6000);
-  const ss = Math.floor((cs % 6000) / 100);
-  const cc = cs % 100;
-  const pad2 = (n) => String(n).padStart(2, "0");
-  return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
-}
-
-// =====================
-// JOB endpoints
-// =====================
-app.get("/job/:id", async (req, res) => {
-  try {
-    mustHaveBucket();
-    const id = String(req.params.id || "").trim();
-    if (!id) throw new Error("missing id");
-
-    const statusObject = `${OUTPUT_PREFIX}/jobs/${id}.json`;
-    const st = await gcsReadJson({ bucket: OUTPUT_BUCKET, objectName: statusObject });
-
-    if (!st) return res.status(404).json({ ok: false, error: "job not found" });
-    return res.status(200).json({ ok: true, job: st });
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// =====================
-// ASYNC RENDER
-// =====================
 app.post("/render", async (req, res) => {
   const {
     audio_url,
@@ -317,121 +179,39 @@ app.post("/render", async (req, res) => {
   } = req.body || {};
 
   try {
-    mustHaveBucket();
-
     if (!audio_url) throw new Error("audio_url is required");
     if (!end_card_url) throw new Error("end_card_url is required");
     ensureArray(images, "images");
     if (images.length !== 4) throw new Error("images must have exactly 4 URLs");
     ensureArray(captions, "captions");
 
-    const jobId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+    const workDir = tmp.dirSync({ unsafeCleanup: true }).name;
 
-    const mp4Object = `${OUTPUT_PREFIX}/mp4/${jobId}.mp4`;
-    const statusObject = `${OUTPUT_PREFIX}/jobs/${jobId}.json`;
+    const img1Path = path.join(workDir, "img1.png");
+    const img2Path = path.join(workDir, "img2.png");
+    const img3Path = path.join(workDir, "img3.png");
+    const img4Path = path.join(workDir, "img4.png");
+    const endPath = path.join(workDir, "end.png");
 
-    const mp4Url = publicGcsUrl(OUTPUT_BUCKET, mp4Object);
-    const statusUrl = `/job/${jobId}`;
+    const audioPath = path.join(workDir, "audio.mp3");
+    const assPath = path.join(workDir, "subs.ass");
+    const outPath = path.join(workDir, "out.mp4");
 
-    // write initial status
-    await gcsUploadJson({
-      bucket: OUTPUT_BUCKET,
-      objectName: statusObject,
-      json: {
-        id: jobId,
-        status: "queued",
-        created_at: new Date().toISOString(),
-        mp4_url: mp4Url
-      }
-    });
+    const sloganMp3Path = path.join(workDir, "end_card_audio.mp3");
+    const sloganWavPath = path.join(workDir, "end_card_audio.wav");
 
-    // respond immediately (Make < 300s safe)
-    res.status(202).json({
-      ok: true,
-      job_id: jobId,
-      status_url: statusUrl,
-      mp4_url: mp4Url
-    });
+    const sloganUrl = (end_card_audio_url && String(end_card_audio_url).trim()) || "";
+    let hasEndCardAudio = Boolean(sloganUrl);
 
-    // run async (do NOT await)
-    runJob({
-      jobId,
-      statusObject,
-      mp4Object,
-      mp4Url,
-      audio_url,
-      images,
-      captions,
-      end_card_url,
-      end_card_duration_ms,
-      end_card_audio_url,
-      video
-    }).catch((e) => {
-      console.error("[job] fatal:", e);
-    });
-  } catch (err) {
-    res.status(400).json({ ok: false, error: String(err?.message || err) });
-  }
-});
+    console.log("[render] has end_card_audio_url:", hasEndCardAudio ? "YES" : "NO");
+    if (hasEndCardAudio) console.log("[render] end_card_audio_url:", sloganUrl);
 
-// =====================
-// JOB worker
-// =====================
-async function updateJob(jobId, statusObject, patch) {
-  try {
-    const next = { id: jobId, updated_at: new Date().toISOString(), ...patch };
-    await gcsUploadJson({ bucket: OUTPUT_BUCKET, objectName: statusObject, json: next });
-  } catch (e) {
-    console.log("[job] status update failed:", String(e?.message || e));
-  }
-}
-
-async function runJob(params) {
-  const {
-    jobId,
-    statusObject,
-    mp4Object,
-    mp4Url,
-    audio_url,
-    images,
-    captions,
-    end_card_url,
-    end_card_duration_ms,
-    end_card_audio_url,
-    video
-  } = params;
-
-  const startedAt = Date.now();
-  await updateJob(jobId, statusObject, { status: "downloading", mp4_url: mp4Url });
-
-  const workDir = tmp.dirSync({ unsafeCleanup: true }).name;
-
-  const img1Path = path.join(workDir, "img1.png");
-  const img2Path = path.join(workDir, "img2.png");
-  const img3Path = path.join(workDir, "img3.png");
-  const img4Path = path.join(workDir, "img4.png");
-  const endPath = path.join(workDir, "end.png");
-
-  const audioPath = path.join(workDir, "audio.mp3");
-  const assPath = path.join(workDir, "subs.ass");
-  const outPath = path.join(workDir, "out.mp4");
-
-  const sloganMp3Path = path.join(workDir, "end_card_audio.mp3");
-  const sloganWavPath = path.join(workDir, "end_card_audio.wav");
-
-  const sloganUrl = (end_card_audio_url && String(end_card_audio_url).trim()) || "";
-  let hasEndCardAudio = Boolean(sloganUrl);
-
-  try {
-    // Parallel downloads
-    await Promise.all([
-      downloadToFile(images[0], img1Path),
-      downloadToFile(images[1], img2Path),
-      downloadToFile(images[2], img3Path),
-      downloadToFile(images[3], img4Path),
-      downloadToFile(end_card_url, endPath),
-      downloadToFile(audio_url, audioPath)
-    ]);
+    await downloadToFile(images[0], img1Path);
+    await downloadToFile(images[1], img2Path);
+    await downloadToFile(images[2], img3Path);
+    await downloadToFile(images[3], img4Path);
+    await downloadToFile(end_card_url, endPath);
+    await downloadToFile(audio_url, audioPath);
 
     if (hasEndCardAudio) {
       await downloadToFile(sloganUrl, sloganMp3Path);
@@ -474,8 +254,6 @@ async function runJob(params) {
       }
     }
 
-    await updateJob(jobId, statusObject, { status: "rendering" });
-
     // Probe main audio duration
     let audioMs = NaN;
     try {
@@ -496,30 +274,35 @@ async function runJob(params) {
 
     const w = Number(video.width || 1080);
     const h = Number(video.height || 1920);
-
-    // TURBO defaults to fit under time (you can tweak)
-    const fps = 20; // turbo
-    const crf = 32; // turbo
+    const fps = Number(video.fps || 30);
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
+    // If probe failed, use last caption end as “audio”
     let effectiveAudioMs = audioMs;
     if (!Number.isFinite(effectiveAudioMs) || effectiveAudioMs <= 0) {
       const lastEnd = scaledCaptions.length ? Number(scaledCaptions[scaledCaptions.length - 1].end_ms) : 0;
       effectiveAudioMs = Number.isFinite(lastEnd) && lastEnd > 0 ? Math.round(lastEnd) : 15000;
     }
 
-    // SLIDE timing
+    // =============================
+    // SLIDES TIMING (SEGMENT-DRIVEN)
+    // 7 segments:
+    // - img1 = seg1
+    // - img2 = seg2+seg3
+    // - img3 = seg4+seg5
+    // - img4 = seg6+seg7
+    // =============================
     let seg1 = 0,
       seg2 = 0,
       seg3 = 0,
       seg4 = 0;
 
     if (scaledCaptions.length >= 7) {
-      const t1 = Math.round(Number(scaledCaptions[0].end_ms));
-      const t3 = Math.round(Number(scaledCaptions[2].end_ms));
-      const t5 = Math.round(Number(scaledCaptions[4].end_ms));
-      const t7 = Math.round(Number(scaledCaptions[6].end_ms));
+      const t1 = Math.round(Number(scaledCaptions[0].end_ms)); // end seg1
+      const t3 = Math.round(Number(scaledCaptions[2].end_ms)); // end seg3
+      const t5 = Math.round(Number(scaledCaptions[4].end_ms)); // end seg5
+      const t7 = Math.round(Number(scaledCaptions[6].end_ms)); // end seg7
 
       seg1 = Math.max(1, t1);
       seg2 = Math.max(1, t3 - t1);
@@ -528,6 +311,7 @@ async function runJob(params) {
 
       effectiveAudioMs = Math.max(effectiveAudioMs, t7);
     } else {
+      // Fallback: split into 4 equal parts if input is malformed
       const part = Math.floor(effectiveAudioMs / 4);
       seg1 = Math.max(1, part);
       seg2 = Math.max(1, part);
@@ -535,27 +319,13 @@ async function runJob(params) {
       seg4 = Math.max(1, effectiveAudioMs - seg1 - seg2 - seg3);
     }
 
-    const fadeMs = 80;
-    const fadeSec = (fadeMs / 1000).toFixed(3);
-
-    const seg1In = seg1 + fadeMs;
-    const seg2In = seg2 + fadeMs;
-    const seg3In = seg3 + fadeMs;
-    const seg4In = seg4;
-
-    const seg1Sec = seg1 / 1000;
-    const seg2Sec = seg2 / 1000;
-    const seg3Sec = seg3 / 1000;
-
     const slideshowMs = Math.max(1, Math.round(seg1 + seg2 + seg3 + seg4));
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    const off1 = (seg1Sec - fadeMs / 1000).toFixed(3);
-    const off2 = (seg1Sec + seg2Sec - fadeMs / 1000).toFixed(3);
-    const off3 = (seg1Sec + seg2Sec + seg3Sec - fadeMs / 1000).toFixed(3);
+    const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
-    // ASS subtitles (keep your sizes/segments + centered + nudged down)
+    // SUBTITLES (ASS)
     const titleFontSize = 150;
     const titleOutline = 5;
 
@@ -563,8 +333,14 @@ async function runJob(params) {
     const captionOutline = 3;
 
     const marginLR = Math.round(w * 0.10);
-    const titleMarginV = Math.round(h * 0.34);
-    const captionMarginV = Math.min(h - 10, titleMarginV + Math.round(captionFontSize * 1.25));
+
+    // >>> CHANGE: center ALL subtitles in the middle of the screen
+    // ASS Alignment:
+    // 5 = middle-center
+    // For center positioning, MarginV isn't needed, so we set it to 0.
+    const marginV = 0;
+    const titleMarginV = 0;
+    // <<< END CHANGE
 
     const titleMaxCharsPerLine = 12;
     const titleMaxLines = 6;
@@ -581,12 +357,23 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,8,${marginLR},${marginLR},${titleMarginV},1
-Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,8,${marginLR},${marginLR},${captionMarginV},1
+Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,5,${marginLR},${marginLR},${titleMarginV},1
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,5,${marginLR},${marginLR},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
+
+    function msToAssTime(ms) {
+      const t = Math.max(0, Number(ms) || 0);
+      const cs = Math.floor(t / 10);
+      const hh = Math.floor(cs / 360000);
+      const mm = Math.floor((cs % 360000) / 6000);
+      const ss = Math.floor((cs % 6000) / 100);
+      const cc = cs % 100;
+      const pad2 = (n) => String(n).padStart(2, "0");
+      return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
+    }
 
     let ass = header;
 
@@ -608,53 +395,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO motion (turbo + jitter fixes)
-    const baseScale = 1.15;
-    const baseW = Math.ceil((w * baseScale) / 16) * 16;
-    const baseH = Math.ceil((h * baseScale) / 16) * 16;
-
-    const hookZoomDelta = 0.14;
-    const midZoomDelta = 0.08;
-
-    function zoompanOnlyZoom(tagIn, tagOut, durMs, zoomDelta) {
-      const frames = Math.max(2, Math.round((durMs / 1000) * fps));
-      const denom = Math.max(1, frames - 1);
-
-      const z = `1+(${zoomDelta})*(on/${denom})`;
-
-      // stable center lock (prevents jitter)
-      const x = `floor(iw/2-(iw/(2*zoom)))`;
-      const y = `floor(ih/2-(ih/(2*zoom)))`;
-
-      return (
-        `[${tagIn}]` +
-        `scale=${baseW}:${baseH}:force_original_aspect_ratio=increase:flags=fast_bilinear,setsar=1,` +
-        `zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=${w}x${h}:fps=${fps},` +
-        `setpts=PTS-STARTPTS,format=yuv420p` +
-        `[${tagOut}]`
-      );
-    }
-
-    const endCover =
-      `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=fast_bilinear,` +
-      `crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
-
+    // VIDEO FILTER
     const filterParts = [
-      zoompanOnlyZoom("0:v", "s0", seg1In, hookZoomDelta),
-      zoompanOnlyZoom("1:v", "s1", seg2In, midZoomDelta),
-      zoompanOnlyZoom("2:v", "s2", seg3In, midZoomDelta),
-      zoompanOnlyZoom("3:v", "s3", seg4In, midZoomDelta),
+      `[0:v]${coverCrop}[v0]`,
+      `[1:v]${coverCrop}[v1]`,
+      `[2:v]${coverCrop}[v2]`,
+      `[3:v]${coverCrop}[v3]`,
+      `[4:v]${coverCrop}[v4]`,
 
-      `[s0][s1]xfade=transition=fade:duration=${fadeSec}:offset=${off1}[x01]`,
-      `[x01][s2]xfade=transition=fade:duration=${fadeSec}:offset=${off2}[x012]`,
-      `[x012][s3]xfade=transition=fade:duration=${fadeSec}:offset=${off3}[slideshow]`,
+      `[v0]trim=duration=${(seg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
+      `[v1]trim=duration=${(seg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
+      `[v2]trim=duration=${(seg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
+      `[v3]trim=duration=${(seg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
+      `[s0][s1][s2][s3]concat=n=4:v=1:a=0[slideshow]`,
 
-      `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[styled]`,
+      `[slideshow]ass=${assPath.replace(/\\/g, "\\\\")}[subbed]`,
 
-      `[4:v]${endCover}[v4]`,
       `[v4]trim=duration=${(endCardDurMs / 1000).toFixed(3)},setpts=PTS-STARTPTS[endcard]`,
-
-      `[styled][endcard]concat=n=2:v=1:a=0[vout]`
+      `[subbed][endcard]concat=n=2:v=1:a=0[vout]`
     ];
 
     // AUDIO
@@ -668,13 +426,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[5:a]asetpts=PTS-STARTPTS,` +
         `atrim=0:${endCardStartSec.toFixed(3)},` +
         `apad=pad_dur=${(endCardDurMs / 1000 + 2).toFixed(3)},` +
-        `atrim=0:${totalDurSec.toFixed(3)}[amain]`
+        `atrim=0:${totalDurSec.toFixed(3)}` +
+        `[amain]`
     );
 
     if (hasEndCardAudio) {
       const fadeIn = 0.12;
+
       filterParts.push(
-        `[6:a]asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeIn},volume=1.35,adelay=${sloganDelayMs}|${sloganDelayMs}[aslogan]`,
+        `[6:a]asetpts=PTS-STARTPTS,` +
+          `afade=t=in:st=0:d=${fadeIn},` +
+          `volume=1.35,` +
+          `adelay=${sloganDelayMs}|${sloganDelayMs}` +
+          `[aslogan]`,
         `[amain][aslogan]amix=inputs=2:duration=longest:normalize=0[aout]`,
         `[aout]atrim=0:${totalDurSec.toFixed(3)}[aout2]`
       );
@@ -686,37 +450,32 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     const args = [
       "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-threads",
-      "0",
 
       "-loop",
       "1",
       "-t",
-      (seg1In / 1000).toFixed(3),
+      (seg1 / 1000).toFixed(3),
       "-i",
       img1Path,
 
       "-loop",
       "1",
       "-t",
-      (seg2In / 1000).toFixed(3),
+      (seg2 / 1000).toFixed(3),
       "-i",
       img2Path,
 
       "-loop",
       "1",
       "-t",
-      (seg3In / 1000).toFixed(3),
+      (seg3 / 1000).toFixed(3),
       "-i",
       img3Path,
 
       "-loop",
       "1",
       "-t",
-      (seg4In / 1000).toFixed(3),
+      (seg4 / 1000).toFixed(3),
       "-i",
       img4Path,
 
@@ -731,75 +490,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       audioPath
     ];
 
-    if (hasEndCardAudio) args.push("-i", sloganWavPath);
+    if (hasEndCardAudio) {
+      args.push("-i", sloganWavPath);
+    }
 
     args.push(
       "-filter_complex",
       filter,
+
       "-map",
       "[vout]",
       "-map",
       "[aout2]",
+
       "-r",
       String(fps),
 
       "-c:v",
       "libx264",
-      "-preset",
-      "ultrafast",
-      "-tune",
-      "zerolatency",
-      "-crf",
-      String(crf),
       "-pix_fmt",
       "yuv420p",
       "-profile:v",
-      "baseline",
+      "high",
       "-level",
-      "3.1",
+      "4.1",
 
       "-c:a",
       "aac",
       "-b:a",
-      "128k",
+      "192k",
 
       outPath
     );
 
-    console.log("[job] ffmpeg args:", args.join(" "));
+    console.log("[render] ffmpeg args:", args.join(" "));
+
     await execFileAsync("ffmpeg", args);
 
-    await updateJob(jobId, statusObject, { status: "uploading" });
-
-    // Upload mp4 to GCS (durable URL)
-    await gcsUploadFile({
-      bucket: OUTPUT_BUCKET,
-      objectName: mp4Object,
-      filePath: outPath,
-      contentType: "video/mp4"
-    });
-
-    const totalSec = Math.round((Date.now() - startedAt) / 1000);
-
-    await updateJob(jobId, statusObject, {
-      status: "done",
-      mp4_url: mp4Url,
-      finished_at: new Date().toISOString(),
-      render_seconds: totalSec
-    });
-
-    console.log("[job] done:", jobId, "sec:", totalSec);
-  } catch (e) {
-    const msg = String(e?.message || e);
-    console.log("[job] error:", jobId, msg);
-    await updateJob(jobId, statusObject, {
-      status: "error",
-      error: msg,
-      finished_at: new Date().toISOString()
-    });
+    const mp4 = fs.readFileSync(outPath);
+    res.setHeader("Content-Type", "video/mp4");
+    res.status(200).send(mp4);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err?.message || err) });
   }
-}
+});
 
-// =====================
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`listening on ${port}`));
