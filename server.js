@@ -205,12 +205,15 @@ app.post("/render", async (req, res) => {
     console.log("[render] has end_card_audio_url:", hasEndCardAudio ? "YES" : "NO");
     if (hasEndCardAudio) console.log("[render] end_card_audio_url:", sloganUrl);
 
-    await downloadToFile(images[0], img1Path);
-    await downloadToFile(images[1], img2Path);
-    await downloadToFile(images[2], img3Path);
-    await downloadToFile(images[3], img4Path);
-    await downloadToFile(end_card_url, endPath);
-    await downloadToFile(audio_url, audioPath);
+    // TURBO: download assets in parallel (big real-world speed win)
+    await Promise.all([
+      downloadToFile(images[0], img1Path),
+      downloadToFile(images[1], img2Path),
+      downloadToFile(images[2], img3Path),
+      downloadToFile(images[3], img4Path),
+      downloadToFile(end_card_url, endPath),
+      downloadToFile(audio_url, audioPath)
+    ]);
 
     if (hasEndCardAudio) {
       await downloadToFile(sloganUrl, sloganMp3Path);
@@ -273,7 +276,9 @@ app.post("/render", async (req, res) => {
 
     const w = Number(video.width || 1080);
     const h = Number(video.height || 1920);
-    const fps = Number(video.fps || 30);
+
+    // TURBO: force FPS down (saves lots of CPU)
+    const fps = 24;
 
     const scaledCaptions = normalizeAndScaleCaptions(captions, audioMs);
 
@@ -345,10 +350,7 @@ app.post("/render", async (req, res) => {
 
     const marginLR = Math.round(w * 0.10);
 
-    // Title stays where it was (this matches your first segment)
     const titleMarginV = Math.round(h * 0.34);
-
-    // Captions centered like title, but nudged DOWN
     const captionMarginV = Math.min(h - 10, titleMarginV + Math.round(captionFontSize * 1.25));
 
     const titleMaxCharsPerLine = 12;
@@ -405,19 +407,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     fs.writeFileSync(assPath, ass, "utf8");
 
     // ==========================================================
-    // VIDEO MOTION (ONLY ZOOM, NO DRIFT) — FFmpeg 5.1 compatible
+    // TURBO VIDEO MOTION
     //
-    // Speed optimizations:
-    // - scale flags: fast_bilinear (much faster than lanczos)
-    // - keep jitter fixes (floor center + no trim)
+    // - baseScale smaller (less resample work)
+    // - fast_bilinear scale (fast)
+    // - jitter fixes kept (floor center + no trim after zoompan)
     // ==========================================================
-    const baseScale = 1.32;
-
+    const baseScale = 1.22; // TURBO: lower than 1.32
     const baseW = Math.ceil((w * baseScale) / 16) * 16;
     const baseH = Math.ceil((h * baseScale) / 16) * 16;
 
-    const hookZoomDelta = 0.14; // stronger for hook
-    const midZoomDelta = 0.08; // subtle for mid slides
+    const hookZoomDelta = 0.14;
+    const midZoomDelta = 0.08;
 
     function zoompanOnlyZoom(tagIn, tagOut, durMs, zoomDelta) {
       const frames = Math.max(2, Math.round((durMs / 1000) * fps));
@@ -551,13 +552,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-r",
       String(fps),
 
-      // FAST encode
+      // TURBO encode settings
       "-c:v",
       "libx264",
       "-preset",
       "ultrafast",
       "-crf",
-      "23",
+      "28", // TURBO: higher CRF => faster + smaller output
       "-pix_fmt",
       "yuv420p",
       "-profile:v",
@@ -568,7 +569,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       "-c:a",
       "aac",
       "-b:a",
-      "192k",
+      "160k", // TURBO: slightly lower audio bitrate
 
       outPath
     );
@@ -576,7 +577,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     console.log("[render] ffmpeg args:", args.join(" "));
     await execFileAsync("ffmpeg", args);
 
-    // Stream output (faster + no huge memory buffer)
+    // Stream output (fast + no huge memory buffer)
     res.setHeader("Content-Type", "video/mp4");
     const rs = fs.createReadStream(outPath);
     rs.on("error", (e) => {
