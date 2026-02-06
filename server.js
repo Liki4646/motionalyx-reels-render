@@ -336,7 +336,6 @@ app.post("/render", async (req, res) => {
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
-    // 1:1 with your working file
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     // SUBTITLES (ASS)
@@ -346,24 +345,15 @@ app.post("/render", async (req, res) => {
     const captionFontSize = 100;
     const captionOutline = 3;
 
-    // Center (segments 1-5) are bigger + bold
-    const titleCenterFontSize = 170;
-    const captionCenterFontSize = 120;
-
     const marginLR = Math.round(w * 0.10);
 
-    // Bottom placement for seg6-7 (kept like your bottom style)
-    const marginV = Math.round(h * 0.10);
+    // Center all subtitles on screen
+    const marginV = 0;
+    const titleMarginV = 0;
 
-    // Slide-in params
+    // Slide-in params (B)
     const capX = Math.round(w / 2);
-
-    // Center position for seg1-5
-    const capYCenter = Math.round(h / 2);
-
-    // Bottom position for seg6-7
-    const capYBottom = Math.round(h - marginV - Math.round(captionFontSize * 0.9));
-
+    const capY = Math.round(h / 2);
     const slideDy = Math.max(20, Math.round(h * 0.035)); // ~3.5% of height
     const slideInMs = 220;
     const fadeInMs = 120;
@@ -384,9 +374,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TitleCenter,DejaVu Sans,${titleCenterFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,5,${marginLR},${marginLR},0,1
-Style: CaptionCenter,DejaVu Sans,${captionCenterFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,5,${marginLR},${marginLR},0,1
-Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,2,${marginLR},${marginLR},${marginV},1
+Style: Title,DejaVu Sans,${titleFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${titleOutline},0,5,${marginLR},${marginLR},${titleMarginV},1
+Style: Caption,DejaVu Sans,${captionFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${captionOutline},0,5,${marginLR},${marginLR},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -403,8 +392,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
     }
 
-    const slideTagCenter = `{\\move(${capX},${capYCenter + slideDy},${capX},${capYCenter},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
-    const slideTagBottom = `{\\move(${capX},${capYBottom + slideDy},${capX},${capYBottom},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
+    // Slide-in override (from slightly below -> center), plus fade
+    // \move(x1,y1,x2,y2,t1,t2) is in ms relative to line start
+    const slideTag = `{\\move(${capX},${capY + slideDy},${capX},${capY},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
 
     let ass = header;
 
@@ -412,28 +402,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const c = scaledCaptions[i];
       const start = msToAssTime(c.start_ms);
       const end = msToAssTime(c.end_ms);
-      const raw = assEscape(c.text);
 
-      // Segments 1-5 centered, bigger, bold
-      if (i >= 0 && i <= 4) {
-        if (i === 0) {
-          const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
-          ass += `Dialogue: 0,${start},${end},TitleCenter,,0,0,0,,${slideTagCenter}${wrapped}\n`;
-        } else {
-          const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
-          ass += `Dialogue: 0,${start},${end},CaptionCenter,,0,0,0,,${slideTagCenter}${wrapped}\n`;
-        }
-        continue;
+      if (i === 0) {
+        const raw = assEscape(c.text);
+        const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
+        ass += `Dialogue: 0,${start},${end},Title,,0,0,0,,${slideTag}${wrapped}\n`;
+      } else {
+        const raw = assEscape(c.text);
+        const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
+        ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${slideTag}${wrapped}\n`;
       }
-
-      // Segments 6-7 bottom, smaller
-      const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
-      ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${slideTagBottom}${wrapped}\n`;
     }
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO FILTER (1:1 with your working file)
+    // VIDEO FILTER (Classic dissolve crossfade)
     const xfadeDur = 0.30;
 
     // Make sure each segment can accommodate the fade (avoid negative offsets)
