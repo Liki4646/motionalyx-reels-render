@@ -336,6 +336,7 @@ app.post("/render", async (req, res) => {
     const endCardDurMs = Math.max(0, Math.round(Number(end_card_duration_ms) || 0));
     const totalMs = slideshowMs + endCardDurMs;
 
+    // 1:1 with your working file
     const coverCrop = `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,fps=${fps},format=yuv420p`;
 
     // SUBTITLES (ASS)
@@ -351,9 +352,8 @@ app.post("/render", async (req, res) => {
 
     const marginLR = Math.round(w * 0.10);
 
-    // Bottom placement (safe zone) - unchanged for seg6-7
+    // Bottom placement for seg6-7 (kept like your bottom style)
     const marginV = Math.round(h * 0.10);
-    const titleMarginV = Math.round(h * 0.10);
 
     // Slide-in params
     const capX = Math.round(w / 2);
@@ -361,7 +361,7 @@ app.post("/render", async (req, res) => {
     // Center position for seg1-5
     const capYCenter = Math.round(h / 2);
 
-    // Bottom position for seg6-7 (kept "as is" behavior: use margins + a safe lower Y)
+    // Bottom position for seg6-7
     const capYBottom = Math.round(h - marginV - Math.round(captionFontSize * 0.9));
 
     const slideDy = Math.max(20, Math.round(h * 0.035)); // ~3.5% of height
@@ -403,10 +403,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       return `${hh}:${pad2(mm)}:${pad2(ss)}.${pad2(cc)}`;
     }
 
-    // Slide-in override for CENTER (segments 1-5)
     const slideTagCenter = `{\\move(${capX},${capYCenter + slideDy},${capX},${capYCenter},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
-
-    // Slide-in override for BOTTOM (segments 6-7) - unchanged placement intent
     const slideTagBottom = `{\\move(${capX},${capYBottom + slideDy},${capX},${capYBottom},0,${slideInMs})\\fad(${fadeInMs},${fadeOutMs})}`;
 
     let ass = header;
@@ -415,10 +412,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const c = scaledCaptions[i];
       const start = msToAssTime(c.start_ms);
       const end = msToAssTime(c.end_ms);
-
       const raw = assEscape(c.text);
 
-      // Segments 1-5 -> bigger bold centered middle
+      // Segments 1-5 centered, bigger, bold
       if (i >= 0 && i <= 4) {
         if (i === 0) {
           const wrapped = wrapByChars(raw, titleMaxCharsPerLine, titleMaxLines);
@@ -430,14 +426,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         continue;
       }
 
-      // Segments 6-7 -> keep as they are now: smaller + bottom
+      // Segments 6-7 bottom, smaller
       const wrapped = wrapByChars(raw, capMaxCharsPerLine, capMaxLines);
       ass += `Dialogue: 0,${start},${end},Caption,,0,0,0,,${slideTagBottom}${wrapped}\n`;
     }
 
     fs.writeFileSync(assPath, ass, "utf8");
 
-    // VIDEO FILTER (Ken Burns smooth zoom + premium crossfade)
+    // VIDEO FILTER (1:1 with your working file)
     const xfadeDur = 0.30;
 
     // Make sure each segment can accommodate the fade (avoid negative offsets)
@@ -450,24 +446,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const off2 = Math.max(0.001, (safeSeg1 + safeSeg2) / 1000 - 2 * xfadeDur);
     const off3 = Math.max(0.001, (safeSeg1 + safeSeg2 + safeSeg3) / 1000 - 3 * xfadeDur);
 
-    // Ken Burns (very subtle zoom-in: 1.00 -> 1.04 over the segment)
-    const zoomTo = 1.04;
-
-    const frames1 = Math.max(2, Math.round((safeSeg1 / 1000) * fps));
-    const frames2 = Math.max(2, Math.round((safeSeg2 / 1000) * fps));
-    const frames3 = Math.max(2, Math.round((safeSeg3 / 1000) * fps));
-    const frames4 = Math.max(2, Math.round((safeSeg4 / 1000) * fps));
-
-    const denom1 = Math.max(1, frames1 - 1);
-    const denom2 = Math.max(1, frames2 - 1);
-    const denom3 = Math.max(1, frames3 - 1);
-    const denom4 = Math.max(1, frames4 - 1);
-
-    const kb1 = `zoompan=z='min(${zoomTo},1+(${zoomTo}-1)*on/${denom1})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames1}:s=${w}x${h}:fps=${fps}`;
-    const kb2 = `zoompan=z='min(${zoomTo},1+(${zoomTo}-1)*on/${denom2})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames2}:s=${w}x${h}:fps=${fps}`;
-    const kb3 = `zoompan=z='min(${zoomTo},1+(${zoomTo}-1)*on/${denom3})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames3}:s=${w}x${h}:fps=${fps}`;
-    const kb4 = `zoompan=z='min(${zoomTo},1+(${zoomTo}-1)*on/${denom4})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames4}:s=${w}x${h}:fps=${fps}`;
-
     const filterParts = [
       `[0:v]${coverCrop}[v0]`,
       `[1:v]${coverCrop}[v1]`,
@@ -475,10 +453,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `[3:v]${coverCrop}[v3]`,
       `[4:v]${coverCrop}[v4]`,
 
-      `[v0]trim=duration=${(safeSeg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS,${kb1}[s0]`,
-      `[v1]trim=duration=${(safeSeg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS,${kb2}[s1]`,
-      `[v2]trim=duration=${(safeSeg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS,${kb3}[s2]`,
-      `[v3]trim=duration=${(safeSeg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS,${kb4}[s3]`,
+      `[v0]trim=duration=${(safeSeg1 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s0]`,
+      `[v1]trim=duration=${(safeSeg2 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s1]`,
+      `[v2]trim=duration=${(safeSeg3 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s2]`,
+      `[v3]trim=duration=${(safeSeg4 / 1000).toFixed(3)},setpts=PTS-STARTPTS[s3]`,
 
       `[s0][s1]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off1.toFixed(3)}[x01]`,
       `[x01][s2]xfade=transition=fade:duration=${xfadeDur.toFixed(2)}:offset=${off2.toFixed(3)}[x012]`,
